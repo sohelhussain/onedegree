@@ -6,19 +6,19 @@ pub mod models;
 pub mod rate_limiter;
 pub mod routes;
 
-use std::sync::Arc;
 use axum::{
+    Json, Router,
     extract::Extension,
     routing::{get, post},
-    Json, Router,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sqlx::PgPool;
+use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 use utoipa::{
-    openapi::security::{HttpAuthScheme, HttpBuilder, SecurityScheme},
     Modify, OpenApi,
+    openapi::security::{HttpAuthScheme, HttpBuilder, SecurityScheme},
 };
 use utoipa_swagger_ui::SwaggerUi;
 
@@ -130,12 +130,21 @@ pub fn create_router(app_state: Arc<AppState>) -> Router {
         .route("/v1/auth/register", post(routes::auth::register))
         .route("/v1/auth/login", post(routes::auth::login))
         .route("/v1/auth/verify-email", post(routes::auth::verify_email))
-        .route("/v1/auth/forgot-password", post(routes::auth::forgot_password))
-        .route("/v1/auth/reset-password", post(routes::auth::reset_password))
+        .route(
+            "/v1/auth/forgot-password",
+            post(routes::auth::forgot_password),
+        )
+        .route(
+            "/v1/auth/reset-password",
+            post(routes::auth::reset_password),
+        )
         .route("/v1/auth/refresh", post(routes::auth::refresh_token))
         .route("/v1/auth/logout", post(routes::auth::logout))
         // Profile
-        .route("/v1/me", get(routes::me::get_me).patch(routes::me::update_me))
+        .route(
+            "/v1/me",
+            get(routes::me::get_me).patch(routes::me::update_me),
+        )
         // Home summary
         .route("/v1/home", get(routes::home::get_home))
         .merge(SwaggerUi::new("/v1/swagger-ui").url("/v1/api-docs/openapi.json", ApiDoc::openapi()))

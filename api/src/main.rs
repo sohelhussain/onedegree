@@ -4,11 +4,8 @@ use std::time::Duration;
 use tracing::info;
 
 use api::{
-    config::Config,
-    create_router,
-    mailer::ConsoleMailer,
+    AppState, GoogleVerifier, config::Config, create_router, mailer::ConsoleMailer,
     rate_limiter::RateLimiter,
-    AppState, GoogleVerifier,
 };
 
 #[tokio::main]
@@ -61,7 +58,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let addr = SocketAddr::from(([0, 0, 0, 0], config.port));
 
     info!("1degree Axum API listening on http://{}", addr);
-    info!("Swagger UI documentation available at http://{}/v1/swagger-ui", addr);
+    info!(
+        "Swagger UI documentation available at http://{}/v1/swagger-ui",
+        addr
+    );
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;

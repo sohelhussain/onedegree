@@ -1,19 +1,14 @@
-use std::sync::Arc;
 use axum::{
+    Json,
     extract::{Extension, Query},
     response::IntoResponse,
-    Json,
 };
 use chrono::{NaiveDate, Utc};
 use serde::Deserialize;
+use std::sync::Arc;
 use utoipa::IntoParams;
 
-use crate::{
-    auth::AuthUser,
-    errors::ApiError,
-    models::HomeSummaryResponse,
-    AppState,
-};
+use crate::{AppState, auth::AuthUser, errors::ApiError, models::HomeSummaryResponse};
 
 #[derive(Debug, Deserialize, IntoParams)]
 pub struct HomeQuery {

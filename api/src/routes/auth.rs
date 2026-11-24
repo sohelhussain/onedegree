@@ -1,22 +1,22 @@
-use std::sync::Arc;
 use axum::{
+    Json,
     extract::Extension,
     http::{
-        header::{COOKIE, SET_COOKIE},
         HeaderMap, StatusCode,
+        header::{COOKIE, SET_COOKIE},
     },
     response::IntoResponse,
-    Json,
 };
 use chrono::{Duration, Utc};
 use serde::Deserialize;
+use std::sync::Arc;
 use utoipa::ToSchema;
 
 use crate::{
+    AppState,
     auth::{jwt, password},
     errors::ApiError,
     models::{AuthResponse, RefreshResponse, User, UserRole},
-    AppState,
 };
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -217,7 +217,8 @@ pub async fn google_auth(
 
     let raw_refresh = jwt::generate_refresh_token();
     let hashed_refresh = jwt::hash_refresh_token(&raw_refresh);
-    let expires_at = Utc::now() + chrono::Duration::seconds(state.config.jwt_refresh_expiration_secs);
+    let expires_at =
+        Utc::now() + chrono::Duration::seconds(state.config.jwt_refresh_expiration_secs);
 
     sqlx::query!(
         r#"
@@ -266,7 +267,11 @@ pub async fn register(
     let ip = get_client_ip(&headers);
     state
         .rate_limiter
-        .check(&format!("register:{}", ip), 5, std::time::Duration::from_secs(60))
+        .check(
+            &format!("register:{}", ip),
+            5,
+            std::time::Duration::from_secs(60),
+        )
         .await?;
 
     // 2. Validate password length (minimum 8 characters)
@@ -301,12 +306,9 @@ pub async fn register(
     }
 
     // 4. Reject if email belongs to an existing password account
-    let existing_user = sqlx::query!(
-        "SELECT id FROM users WHERE LOWER(email) = $1",
-        email
-    )
-    .fetch_optional(&state.pool)
-    .await?;
+    let existing_user = sqlx::query!("SELECT id FROM users WHERE LOWER(email) = $1", email)
+        .fetch_optional(&state.pool)
+        .await?;
 
     if existing_user.is_some() {
         return Err(ApiError::BadRequest("Email is already registered".into()));
@@ -351,7 +353,10 @@ pub async fn register(
     tx.commit().await?;
 
     // 8. Dispatch email via mailer
-    let _ = state.mailer.send_verification_email(&email, &raw_token).await;
+    let _ = state
+        .mailer
+        .send_verification_email(&email, &raw_token)
+        .await;
 
     Ok((
         StatusCode::CREATED,
@@ -380,7 +385,11 @@ pub async fn login(
     let ip = get_client_ip(&headers);
     state
         .rate_limiter
-        .check(&format!("login:{}", ip), 10, std::time::Duration::from_secs(60))
+        .check(
+            &format!("login:{}", ip),
+            10,
+            std::time::Duration::from_secs(60),
+        )
         .await?;
 
     let email = payload.email.trim().to_lowercase();
@@ -505,12 +514,16 @@ pub async fn verify_email(
     let record = match record {
         Some(r) => r,
         None => {
-            return Err(ApiError::BadRequest("Invalid or expired verification token".into()));
+            return Err(ApiError::BadRequest(
+                "Invalid or expired verification token".into(),
+            ));
         }
     };
 
     if record.used_at.is_some() || record.expires_at < Utc::now() {
-        return Err(ApiError::BadRequest("Invalid or expired verification token".into()));
+        return Err(ApiError::BadRequest(
+            "Invalid or expired verification token".into(),
+        ));
     }
 
     // Mark token used (single-use)
@@ -530,12 +543,10 @@ pub async fn verify_email(
     .await?;
 
     // Check if user's verified email is in ADMIN_EMAILS
-    let user_email: Option<String> = sqlx::query_scalar!(
-        "SELECT email FROM users WHERE id = $1",
-        record.user_id
-    )
-    .fetch_one(&mut *tx)
-    .await?;
+    let user_email: Option<String> =
+        sqlx::query_scalar!("SELECT email FROM users WHERE id = $1", record.user_id)
+            .fetch_one(&mut *tx)
+            .await?;
 
     if let Some(em) = user_email {
         let lower = em.trim().to_lowercase();
@@ -596,7 +607,10 @@ pub async fn forgot_password(
             .execute(&state.pool)
             .await;
 
-            let _ = state.mailer.send_password_reset_email(&email, &raw_token).await;
+            let _ = state
+                .mailer
+                .send_password_reset_email(&email, &raw_token)
+                .await;
         }
     }
 
@@ -643,12 +657,16 @@ pub async fn reset_password(
     let record = match record {
         Some(r) => r,
         None => {
-            return Err(ApiError::BadRequest("Invalid or expired password reset token".into()));
+            return Err(ApiError::BadRequest(
+                "Invalid or expired password reset token".into(),
+            ));
         }
     };
 
     if record.used_at.is_some() || record.expires_at < Utc::now() {
-        return Err(ApiError::BadRequest("Invalid or expired password reset token".into()));
+        return Err(ApiError::BadRequest(
+            "Invalid or expired password reset token".into(),
+        ));
     }
 
     let new_hash = password::hash_password(&payload.new_password)?;

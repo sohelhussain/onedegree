@@ -1,26 +1,26 @@
-use std::sync::Arc;
 use axum::{
+    Router,
     body::Body,
     http::{
-        header::{AUTHORIZATION, CONTENT_TYPE, COOKIE, SET_COOKIE},
         Request, StatusCode,
+        header::{AUTHORIZATION, CONTENT_TYPE, COOKIE, SET_COOKIE},
     },
-    Router,
 };
 use chrono::{Duration, Utc};
 use http_body_util::BodyExt;
 use serde_json::Value;
+use std::sync::Arc;
 use tower::ServiceExt;
 use uuid::Uuid;
 
 use api::{
+    AppState, GoogleVerifier,
     auth::jwt,
     config::Config,
     create_router,
     mailer::ConsoleMailer,
-    models::{has_premium, User, UserRole},
+    models::{User, UserRole, has_premium},
     rate_limiter::RateLimiter,
-    AppState, GoogleVerifier,
 };
 
 async fn setup_test_app() -> (Router, Arc<AppState>) {
@@ -206,10 +206,12 @@ async fn test_replayed_refresh_token_revokes_all_sessions() {
 
     let body_bytes = replay_res.into_body().collect().await.unwrap().to_bytes();
     let json_body: Value = serde_json::from_slice(&body_bytes).unwrap();
-    assert!(json_body["error"]["message"]
-        .as_str()
-        .unwrap()
-        .contains("revoked or replayed"));
+    assert!(
+        json_body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("revoked or replayed")
+    );
 
     // Verify all tokens revoked
     let hash_2 = jwt::hash_refresh_token(&raw_token_2);
@@ -351,8 +353,15 @@ async fn test_unverified_email_cannot_become_admin() {
     .await
     .unwrap();
 
-    assert_eq!(user.role, UserRole::User, "Unverified user MUST NOT have admin role");
-    assert!(user.email_verified_at.is_none(), "Email must be unverified initially");
+    assert_eq!(
+        user.role,
+        UserRole::User,
+        "Unverified user MUST NOT have admin role"
+    );
+    assert!(
+        user.email_verified_at.is_none(),
+        "Email must be unverified initially"
+    );
 
     // 3. Test RequireAdmin extractor rejection:
     let token_rec = sqlx::query!(
@@ -406,7 +415,11 @@ async fn test_unverified_email_cannot_become_admin() {
     .await
     .unwrap();
 
-    assert_eq!(verified_user.role, UserRole::Admin, "Verified admin email MUST become admin");
+    assert_eq!(
+        verified_user.role,
+        UserRole::Admin,
+        "Verified admin email MUST become admin"
+    );
     assert!(verified_user.email_verified_at.is_some());
 }
 
@@ -430,14 +443,20 @@ async fn test_admin_has_premium() {
         created_at: Utc::now(),
         updated_at: Utc::now(),
     };
-    assert!(has_premium(&admin_user), "Admin MUST automatically have has_premium == true");
+    assert!(
+        has_premium(&admin_user),
+        "Admin MUST automatically have has_premium == true"
+    );
 
     let normal_user = User {
         role: UserRole::User,
         is_premium: false,
         ..admin_user.clone()
     };
-    assert!(!has_premium(&normal_user), "Non-premium normal user must have has_premium == false");
+    assert!(
+        !has_premium(&normal_user),
+        "Non-premium normal user must have has_premium == false"
+    );
 
     let premium_normal_user = User {
         role: UserRole::User,
@@ -445,7 +464,10 @@ async fn test_admin_has_premium() {
         premium_until: Some(Utc::now() + Duration::days(10)),
         ..admin_user.clone()
     };
-    assert!(has_premium(&premium_normal_user), "Active premium user must have has_premium == true");
+    assert!(
+        has_premium(&premium_normal_user),
+        "Active premium user must have has_premium == true"
+    );
 
     let expired_premium_user = User {
         role: UserRole::User,
@@ -453,7 +475,10 @@ async fn test_admin_has_premium() {
         premium_until: Some(Utc::now() - Duration::days(1)),
         ..admin_user.clone()
     };
-    assert!(!has_premium(&expired_premium_user), "Expired premium user must have has_premium == false");
+    assert!(
+        !has_premium(&expired_premium_user),
+        "Expired premium user must have has_premium == false"
+    );
 
     // 2. Test via GET /v1/me
     let db_admin = sqlx::query_as!(
@@ -471,12 +496,8 @@ async fn test_admin_has_premium() {
     .await
     .unwrap();
 
-    let access_token = jwt::create_access_token(
-        db_admin.id,
-        state.config.jwt_secret.as_bytes(),
-        900,
-    )
-    .unwrap();
+    let access_token =
+        jwt::create_access_token(db_admin.id, state.config.jwt_secret.as_bytes(), 900).unwrap();
 
     let me_req = Request::builder()
         .method("GET")
@@ -587,10 +608,12 @@ async fn test_duplicate_email_rejected() {
     assert_eq!(res4.status(), StatusCode::BAD_REQUEST);
     let body4 = res4.into_body().collect().await.unwrap().to_bytes();
     let json4: Value = serde_json::from_slice(&body4).unwrap();
-    assert!(json4["error"]["message"]
-        .as_str()
-        .unwrap()
-        .contains("sign in with Google"));
+    assert!(
+        json4["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("sign in with Google")
+    );
 }
 
 #[tokio::test]
@@ -614,7 +637,10 @@ async fn test_duration_check() {
     )
     .execute(&state.pool)
     .await;
-    assert!(bad_action_0.is_err(), "duration_minutes = 0 must violate check constraint");
+    assert!(
+        bad_action_0.is_err(),
+        "duration_minutes = 0 must violate check constraint"
+    );
 
     // 2. duration_minutes = 601 violates CHECK
     let bad_action_601 = sqlx::query!(
@@ -624,7 +650,10 @@ async fn test_duration_check() {
     )
     .execute(&state.pool)
     .await;
-    assert!(bad_action_601.is_err(), "duration_minutes = 601 must violate check constraint");
+    assert!(
+        bad_action_601.is_err(),
+        "duration_minutes = 601 must violate check constraint"
+    );
 
     // 3. Valid duration_minutes = 30 succeeds
     let good_action = sqlx::query!(
@@ -645,7 +674,10 @@ async fn test_duration_check() {
     )
     .execute(&state.pool)
     .await;
-    assert!(bad_todo.is_err(), "todo duration_minutes = -1 must fail check constraint");
+    assert!(
+        bad_todo.is_err(),
+        "todo duration_minutes = -1 must fail check constraint"
+    );
 
     let good_todo = sqlx::query!(
         "INSERT INTO todos (user_id, title, target_date, duration_minutes) VALUES ($1, 'Read', $2, 45) RETURNING id",
@@ -657,12 +689,8 @@ async fn test_duration_check() {
     assert!(good_todo.is_ok(), "todo duration_minutes = 45 must succeed");
 
     // 5. Test GET /v1/home calculates planned minutes (30 + 45 = 75)
-    let access_token = jwt::create_access_token(
-        user.id,
-        state.config.jwt_secret.as_bytes(),
-        900,
-    )
-    .unwrap();
+    let access_token =
+        jwt::create_access_token(user.id, state.config.jwt_secret.as_bytes(), 900).unwrap();
 
     let home_req = Request::builder()
         .method("GET")
