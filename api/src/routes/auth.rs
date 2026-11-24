@@ -16,7 +16,7 @@ use crate::{
     AppState,
     auth::{jwt, password},
     errors::ApiError,
-    models::{AuthResponse, RefreshResponse, User, UserRole},
+    models::{AuthResponse, RefreshResponse, UserRole},
 };
 
 #[derive(Debug, Deserialize, ToSchema)]

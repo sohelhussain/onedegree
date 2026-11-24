@@ -5,7 +5,7 @@ use crate::{
     AppState,
     auth::AuthUser,
     errors::ApiError,
-    models::{UpdateUserRequest, User, UserResponse, UserRole},
+    models::{UpdateUserRequest, UserResponse},
 };
 
 #[utoipa::path(
