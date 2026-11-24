@@ -1,4 +1,4 @@
-# 1degree (1degree.fit)
+# onedegree (onedegree.fit)
 
 A plane that tilts just 1 degree ends up hundreds of miles from its original course. **1degree** is a modern personal transformation and wellness platform built on the philosophy that small, non-negotiable daily micro-actions compound into massive personal transformations over 365 days.
 
