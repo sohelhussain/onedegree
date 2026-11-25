@@ -16,7 +16,7 @@ use crate::{
     AppState,
     auth::{jwt, password},
     errors::ApiError,
-    models::{AuthResponse, RefreshResponse, UserRole},
+    models::{AuthResponse, RefreshResponse, User, UserRole},
 };
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -80,9 +80,7 @@ fn extract_refresh_token(headers: &HeaderMap, body: &RefreshRequest) -> Option<S
         .ok()?
         .split(';')
         .find_map(|pair| {
-            let mut parts = pair.trim().splitn(2, '=');
-            let name = parts.next()?;
-            let val = parts.next()?;
+            let (name, val) = pair.trim().split_once('=')?;
             if name == "refresh_token" {
                 Some(val.to_string())
             } else {

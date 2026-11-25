@@ -43,7 +43,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("Database migrations applied successfully.");
 
     let google_verifier = GoogleVerifier::new(config.google_client_id.clone());
-    let mailer = Arc::new(ConsoleMailer::default());
+    let mailer = Arc::new(ConsoleMailer);
     let rate_limiter = RateLimiter::new();
 
     let state = Arc::new(AppState {
