@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                INSERT INTO auth_identities (user_id, provider, provider_user_id)\n                VALUES ($1, 'google', $2)\n                ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Varchar"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "a0d65a29af9b323e134f140ddc13b2483b6ba6a5401b55d7be7c360902ec3e51"
+}
