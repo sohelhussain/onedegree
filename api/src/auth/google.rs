@@ -1,7 +1,7 @@
-use std::sync::Arc;
-use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
+use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::errors::ApiError;
@@ -43,11 +43,13 @@ pub struct GoogleClaims {
     pub picture: Option<String>,
 }
 
+type KeyCache = Option<(std::time::Instant, Vec<JwkKey>)>;
+
 #[derive(Clone)]
 pub struct GoogleVerifier {
     client_id: String,
     http_client: Client,
-    keys_cache: Arc<RwLock<Option<(std::time::Instant, Vec<JwkKey>)>>>,
+    keys_cache: Arc<RwLock<KeyCache>>,
 }
 
 impl GoogleVerifier {

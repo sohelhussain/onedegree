@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT u.id \n        FROM users u\n        JOIN auth_identities ai ON ai.user_id = u.id\n        WHERE LOWER(u.email) = $1 AND ai.provider = 'google'\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "0c42237f64fb27bc222e85fb1e8802e5f959fb1087495a4eb59a4159dc270347"
+}

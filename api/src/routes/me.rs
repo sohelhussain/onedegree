@@ -1,11 +1,11 @@
+use axum::{Json, extract::Extension, response::IntoResponse};
 use std::sync::Arc;
-use axum::{extract::Extension, response::IntoResponse, Json};
 
 use crate::{
+    AppState,
     auth::AuthUser,
     errors::ApiError,
     models::{UpdateUserRequest, User, UserResponse, UserRole},
-    AppState,
 };
 
 #[utoipa::path(

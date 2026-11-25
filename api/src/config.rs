@@ -11,8 +11,8 @@ pub struct Config {
 
 impl Config {
     pub fn from_env() -> Self {
-        let admin_emails_str = std::env::var("ADMIN_EMAILS")
-            .unwrap_or_else(|_| "sohelhussaing@gmail.com".into());
+        let admin_emails_str =
+            std::env::var("ADMIN_EMAILS").unwrap_or_else(|_| "sohelhussaing@gmail.com".into());
         let admin_emails = admin_emails_str
             .split(',')
             .map(|e| e.trim().to_lowercase())

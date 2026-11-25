@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT COALESCE(SUM(da.duration_minutes), 0)::BIGINT\n        FROM action_logs al\n        JOIN daily_actions da ON da.id = al.action_id\n        WHERE al.user_id = $1 AND al.log_date = $2 AND al.status = 'done'\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "coalesce",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Date"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "67ad35bd4da39ef38dac24f9550f72aa8e6cf613296c810af80f489107545504"
+}

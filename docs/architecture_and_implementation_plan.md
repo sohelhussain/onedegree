@@ -9,7 +9,7 @@
 ```mermaid
 flowchart TD
     subgraph Clients["Clients"]
-        Web["Next.js 15 Web App (Tailwind + shadcn + Motion + GSAP Landing)"]
+        Web["Next.js 16 Web App (Tailwind + shadcn + Motion + GSAP Landing)"]
         MobileFuture["Future Mobile Apps (iOS & Android)"]
     end
 
@@ -84,7 +84,7 @@ onedegree/
 │       │   ├── home.rs            # GET /v1/home (planned vs completed minutes)
 │       │   └── me.rs              # GET / PATCH /v1/me (timezone, profile, role, premium)
 │       └── models.rs              # Domain structs, DTOs & DB row mappings
-├── web/                           # Next.js 15 Frontend
+├── web/                           # Next.js 16 Frontend
 │   ├── package.json
 │   ├── tsconfig.json
 │   ├── tailwind.config.ts

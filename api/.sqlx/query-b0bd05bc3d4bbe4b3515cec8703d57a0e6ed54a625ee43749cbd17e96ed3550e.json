@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT COALESCE(SUM(duration_minutes), 0)::BIGINT\n        FROM daily_actions\n        WHERE user_id = $1 AND is_archived = FALSE\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "coalesce",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "b0bd05bc3d4bbe4b3515cec8703d57a0e6ed54a625ee43749cbd17e96ed3550e"
+}

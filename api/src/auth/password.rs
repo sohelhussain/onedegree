@@ -1,6 +1,6 @@
 use argon2::{
-    password_hash::{PasswordHasher, PasswordVerifier},
     Argon2,
+    password_hash::{PasswordHasher, PasswordVerifier},
 };
 
 use crate::errors::ApiError;

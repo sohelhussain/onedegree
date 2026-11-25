@@ -1,5 +1,5 @@
 use chrono::Utc;
-use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
+use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -38,12 +38,8 @@ pub fn verify_access_token(token: &str, secret: &[u8]) -> Result<Uuid, ApiError>
     let mut validation = Validation::default();
     validation.validate_exp = true;
 
-    let token_data = decode::<Claims>(
-        token,
-        &DecodingKey::from_secret(secret),
-        &validation,
-    )
-    .map_err(|e| ApiError::Unauthorized(format!("Invalid or expired access token: {}", e)))?;
+    let token_data = decode::<Claims>(token, &DecodingKey::from_secret(secret), &validation)
+        .map_err(|e| ApiError::Unauthorized(format!("Invalid or expired access token: {}", e)))?;
 
     Uuid::parse_str(&token_data.claims.sub)
         .map_err(|_| ApiError::Unauthorized("Invalid user ID in token subject".into()))
