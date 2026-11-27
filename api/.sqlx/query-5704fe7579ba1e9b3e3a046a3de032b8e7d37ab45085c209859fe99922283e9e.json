@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT created_at\n        FROM email_verification_tokens\n        WHERE user_id = $1\n        ORDER BY created_at DESC\n        LIMIT 1\n        FOR UPDATE\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "5704fe7579ba1e9b3e3a046a3de032b8e7d37ab45085c209859fe99922283e9e"
+}

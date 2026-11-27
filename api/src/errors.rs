@@ -10,6 +10,8 @@ pub enum ApiError {
     BadRequest(String),
     Unauthorized(String),
     Forbidden(String),
+    EmailNotVerified(String),
+    TooManyRequests(String),
     NotFound(String),
     Internal(String),
 }
@@ -20,6 +22,8 @@ impl std::fmt::Display for ApiError {
             ApiError::BadRequest(msg) => write!(f, "Bad Request: {}", msg),
             ApiError::Unauthorized(msg) => write!(f, "Unauthorized: {}", msg),
             ApiError::Forbidden(msg) => write!(f, "Forbidden: {}", msg),
+            ApiError::EmailNotVerified(msg) => write!(f, "Email Not Verified: {}", msg),
+            ApiError::TooManyRequests(msg) => write!(f, "Too Many Requests: {}", msg),
             ApiError::NotFound(msg) => write!(f, "Not Found: {}", msg),
             ApiError::Internal(msg) => write!(f, "Internal Error: {}", msg),
         }
@@ -34,6 +38,10 @@ impl IntoResponse for ApiError {
             ApiError::BadRequest(msg) => (StatusCode::BAD_REQUEST, "BAD_REQUEST", msg),
             ApiError::Unauthorized(msg) => (StatusCode::UNAUTHORIZED, "UNAUTHORIZED", msg),
             ApiError::Forbidden(msg) => (StatusCode::FORBIDDEN, "FORBIDDEN", msg),
+            ApiError::EmailNotVerified(msg) => (StatusCode::FORBIDDEN, "EMAIL_NOT_VERIFIED", msg),
+            ApiError::TooManyRequests(msg) => {
+                (StatusCode::TOO_MANY_REQUESTS, "TOO_MANY_REQUESTS", msg)
+            }
             ApiError::NotFound(msg) => (StatusCode::NOT_FOUND, "NOT_FOUND", msg),
             ApiError::Internal(msg) => {
                 tracing::error!("Internal server error: {}", msg);

@@ -43,6 +43,11 @@ pub struct VerifyEmailRequest {
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
+pub struct ResendVerificationRequest {
+    pub email: String,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct ForgotPasswordRequest {
     pub email: String,
 }
@@ -153,18 +158,30 @@ pub async fn google_auth(
 
     let user = match existing_user_id {
         Some(uid) => {
-            // If user's email is verified by Google and matches ADMIN_EMAILS, update role to admin if not already
-            if initial_role == UserRole::Admin {
-                sqlx::query!(
-                    r#"
-                    UPDATE users
-                    SET role = 'admin', email_verified_at = COALESCE(email_verified_at, now())
-                    WHERE id = $1
-                    "#,
-                    uid
-                )
-                .execute(&mut *tx)
-                .await?;
+            if claims.email_verified.unwrap_or(false) {
+                if initial_role == UserRole::Admin {
+                    sqlx::query!(
+                        r#"
+                        UPDATE users
+                        SET role = 'admin', email_verified_at = COALESCE(email_verified_at, now())
+                        WHERE id = $1
+                        "#,
+                        uid
+                    )
+                    .execute(&mut *tx)
+                    .await?;
+                } else {
+                    sqlx::query!(
+                        r#"
+                        UPDATE users
+                        SET email_verified_at = COALESCE(email_verified_at, now())
+                        WHERE id = $1 AND email_verified_at IS NULL
+                        "#,
+                        uid
+                    )
+                    .execute(&mut *tx)
+                    .await?;
+                }
             }
 
             sqlx::query_as!(
@@ -364,11 +381,17 @@ pub async fn register(
 
     tx.commit().await?;
 
-    // 8. Dispatch email via mailer
-    let _ = state
+    // 8. Dispatch email via mailer (never log tokens or keys)
+    if let Err(err) = state
         .mailer
         .send_verification_email(&email, &raw_token)
-        .await;
+        .await
+    {
+        tracing::error!(
+            "Failed to dispatch verification email during registration: {}",
+            err
+        );
+    }
 
     Ok((
         StatusCode::CREATED,
@@ -456,7 +479,14 @@ pub async fn login(
         return Err(ApiError::Unauthorized("Invalid email or password".into()));
     }
 
-    // 4. Issue 15-minute access token and rotating refresh token
+    // 4. Reject verified-required password login if email is not verified
+    if user.email_verified_at.is_none() {
+        return Err(ApiError::EmailNotVerified(
+            "Please verify your email before signing in.".into(),
+        ));
+    }
+
+    // 5. Issue 15-minute access token and rotating refresh token
     let access_token = jwt::create_access_token(
         user.id,
         state.config.jwt_secret.as_bytes(),
@@ -581,6 +611,125 @@ pub async fn verify_email(
 
 #[utoipa::path(
     post,
+    path = "/v1/auth/resend-verification",
+    request_body = ResendVerificationRequest,
+    responses(
+        (status = 200, description = "Generic confirmation regardless of account existence"),
+        (status = 429, description = "Rate limit exceeded")
+    ),
+    tag = "Auth"
+)]
+pub async fn resend_verification(
+    Extension(state): Extension<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(payload): Json<ResendVerificationRequest>,
+) -> Result<impl IntoResponse, ApiError> {
+    let ip = get_client_ip(&headers);
+    state
+        .rate_limiter
+        .check(
+            &format!("resend_verification:ip:{}", ip),
+            10,
+            std::time::Duration::from_secs(60),
+        )
+        .await?;
+
+    let email = payload.email.trim().to_lowercase();
+    if email.is_empty() || !email.contains('@') {
+        return Err(ApiError::BadRequest("Invalid email address".into()));
+    }
+
+    state
+        .rate_limiter
+        .check(
+            &format!("resend_verification:email:{}", email),
+            5,
+            std::time::Duration::from_secs(900),
+        )
+        .await?;
+
+    let generic_response = Json(serde_json::json!({
+        "message": "If an unverified account exists for this email, a verification link has been sent."
+    }));
+
+    let user = sqlx::query!(
+        "SELECT id, password_hash, email_verified_at FROM users WHERE LOWER(email) = $1",
+        email
+    )
+    .fetch_optional(&state.pool)
+    .await?;
+
+    let Some(u) = user else {
+        return Ok(generic_response);
+    };
+
+    if u.password_hash.is_none() || u.email_verified_at.is_some() {
+        return Ok(generic_response);
+    }
+
+    let mut tx = state.pool.begin().await?;
+
+    // 60-second cooldown per email based on most recent verification token creation
+    let latest_created_at: Option<chrono::DateTime<Utc>> = sqlx::query_scalar!(
+        r#"
+        SELECT created_at
+        FROM email_verification_tokens
+        WHERE user_id = $1
+        ORDER BY created_at DESC
+        LIMIT 1
+        FOR UPDATE
+        "#,
+        u.id
+    )
+    .fetch_optional(&mut *tx)
+    .await?;
+
+    if let Some(created_at) = latest_created_at {
+        if Utc::now().signed_duration_since(created_at) < Duration::seconds(60) {
+            tx.rollback().await?;
+            return Ok(generic_response);
+        }
+    }
+
+    // Invalidate all earlier unused verification tokens for this user
+    sqlx::query!(
+        "UPDATE email_verification_tokens SET used_at = now() WHERE user_id = $1 AND used_at IS NULL",
+        u.id
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    let raw_token = jwt::generate_refresh_token();
+    let token_hash = jwt::hash_refresh_token(&raw_token);
+    let expires_at = Utc::now() + Duration::hours(24);
+
+    sqlx::query!(
+        r#"
+        INSERT INTO email_verification_tokens (user_id, token_hash, expires_at)
+        VALUES ($1, $2, $3)
+        "#,
+        u.id,
+        token_hash,
+        expires_at
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+
+    if let Err(err) = state
+        .mailer
+        .send_verification_email(&email, &raw_token)
+        .await
+    {
+        tracing::error!("Failed to dispatch verification email on resend: {}", err);
+    }
+
+    Ok(generic_response)
+}
+
+#[utoipa::path(
+    post,
     path = "/v1/auth/forgot-password",
     request_body = ForgotPasswordRequest,
     responses(
@@ -607,6 +756,14 @@ pub async fn forgot_password(
             let token_hash = jwt::hash_refresh_token(&raw_token);
             let expires_at = Utc::now() + Duration::hours(1); // 1 hour expiry for reset
 
+            let mut tx = state.pool.begin().await?;
+            let _ = sqlx::query!(
+                "UPDATE password_reset_tokens SET used_at = now() WHERE user_id = $1 AND used_at IS NULL",
+                u.id
+            )
+            .execute(&mut *tx)
+            .await;
+
             let _ = sqlx::query!(
                 r#"
                 INSERT INTO password_reset_tokens (user_id, token_hash, expires_at)
@@ -616,13 +773,18 @@ pub async fn forgot_password(
                 token_hash,
                 expires_at
             )
-            .execute(&state.pool)
+            .execute(&mut *tx)
             .await;
 
-            let _ = state
+            let _ = tx.commit().await;
+
+            if let Err(err) = state
                 .mailer
                 .send_password_reset_email(&email, &raw_token)
-                .await;
+                .await
+            {
+                tracing::error!("Failed to dispatch password reset email: {}", err);
+            }
         }
     }
 
