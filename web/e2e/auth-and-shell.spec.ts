@@ -574,6 +574,75 @@ test.describe("1degree Auth & Mobile-First Shell", () => {
     await context.close();
   });
 
+  test("login Enter clears fields -> Create account sends verification only to registration email & clears register fields", async ({
+    browser,
+  }, testInfo) => {
+    const project = testInfo.project.name;
+    const context = await browser.newContext({
+      viewport: { width: 390, height: 844 },
+    });
+    await attachHostGuard(context);
+    const page = await context.newPage();
+
+    const gsiDuplicateWarnings: string[] = [];
+    page.on("console", (msg) => {
+      if (msg.text().includes("initialize() is called multiple times")) {
+        gsiDuplicateWarnings.push(msg.text());
+      }
+    });
+
+    const loginEmail = makeSyntheticEmail(`loginfirst-${project}`);
+    const regEmail = makeSyntheticEmail(`regsecond-${project}`);
+    const password = makeRandomPassword();
+    const startIdx = outboxLineCount();
+
+    // 1. User types credentials on /login and presses Enter -> fails cleanly & clears inputs
+    await page.goto("/login", { waitUntil: "networkidle" });
+    await page.getByRole("tab", { name: "Email" }).click();
+    await fillField(page.locator("#login-email"), loginEmail);
+    await fillField(page.locator("#login-password"), password);
+    await page.locator("#login-password").press("Enter");
+
+    await expect(page.getByTestId("login-error")).toContainText("Invalid email or password");
+    await expect(page.locator("#login-email")).toHaveValue("");
+    await expect(page.locator("#login-password")).toHaveValue("");
+
+    // 2. Click "Create an account" -> /register fields must start blank
+    await page.getByRole("link", { name: "Create an account" }).click();
+    await page.waitForURL(/\/register/);
+    await page.waitForLoadState("networkidle");
+    await expect(page.locator("#reg-name")).toHaveValue("");
+    await expect(page.locator("#reg-email")).toHaveValue("");
+    await expect(page.locator("#reg-password")).toHaveValue("");
+
+    // 3. Fill second email, name, password and submit via Enter
+    let capturedRegisterEmail = "";
+    await page.route("**/v1/auth/register", async (route) => {
+      const postData = route.request().postDataJSON() as { email?: string } | null;
+      capturedRegisterEmail = postData?.email || "";
+      await route.continue();
+    });
+
+    await fillField(page.locator("#reg-name"), "Second Email User");
+    await fillField(page.locator("#reg-email"), regEmail);
+    await fillField(page.locator("#reg-password"), password);
+    await page.locator("#reg-password").press("Enter");
+
+    // Inputs clear immediately while submitting/navigating to /check-email
+    await page.waitForURL(/\/check-email/);
+    expect(capturedRegisterEmail).toBe(regEmail);
+    expect(decodeURIComponent(page.url())).toContain(regEmail);
+    expect(page.url()).not.toContain(loginEmail);
+
+    // 4. Outbox entry goes ONLY to regEmail, never loginEmail
+    const { entry: verMail } = await waitForOutboxEntry(regEmail, "verification", startIdx);
+    expect(verMail.to.toLowerCase()).toBe(regEmail.toLowerCase());
+    expect(readLatestOutboxEntry(loginEmail, "verification", startIdx)).toBeNull();
+    expect(gsiDuplicateWarnings).toEqual([]);
+
+    await context.close();
+  });
+
   test("rapid failed logins hit rate limit and UI shows friendly message", async ({
     browser,
   }) => {
@@ -583,14 +652,17 @@ test.describe("1degree Auth & Mobile-First Shell", () => {
     await attachHostGuard(context);
     const page = await context.newPage();
 
-    await page.goto("/login");
+    await page.goto("/login", { waitUntil: "networkidle" });
     await page.getByRole("tab", { name: "Email" }).click();
-    await page.getByLabel("Email").fill(makeSyntheticEmail("ratelimit"));
-    await page.getByLabel("Password").fill("WrongPassword1!");
+    const rateEmail = makeSyntheticEmail("ratelimit");
 
     let sawRateLimitMessage = false;
     for (let i = 0; i < 12; i++) {
+      await fillField(page.getByLabel("Email"), rateEmail);
+      await fillField(page.getByLabel("Password"), "WrongPassword1!");
       await page.getByRole("button", { name: "Sign in" }).click();
+      await expect(page.getByLabel("Email")).toHaveValue("");
+      await expect(page.getByLabel("Password")).toHaveValue("");
       const errText = await page.getByTestId("login-error").innerText();
       if (errText.toLowerCase().includes("too many requests")) {
         sawRateLimitMessage = true;
