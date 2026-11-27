@@ -1,4 +1,4 @@
-.PHONY: help db-up db-down db-logs dev-api dev-api-neon dev-web build check clean
+.PHONY: help db-up db-down db-logs dev dev-api dev-api-neon dev-web stop build check clean
 
 # Default target
 help:
@@ -8,6 +8,8 @@ help:
 	@echo "  make db-up         Start PostgreSQL 16 container via Docker Compose"
 	@echo "  make db-down       Stop PostgreSQL container"
 	@echo "  make db-logs       View live PostgreSQL container logs"
+	@echo "  make dev           Start both API and Web servers (background)"
+	@echo "  make stop          Stop both API and Web servers"
 	@echo "  make dev-api       Run Rust Axum API with local Docker PostgreSQL"
 	@echo "  make dev-api-neon  Run Rust Axum API with Neon PostgreSQL"
 	@echo "  make dev-web       Run Next.js 15 Web App (http://localhost:3000)"
@@ -27,6 +29,24 @@ db-logs:
 	docker compose logs -f postgres
 
 # Development Commands
+dev:
+	@echo "Starting 1degree API (port 8080) and Web (port 3000)..."
+	@cd api && cargo run &
+	@cd web && pnpm dev &
+	@echo ""
+	@echo "✓ API  → http://localhost:8080"
+	@echo "✓ Web  → http://localhost:3000"
+	@echo "✓ Docs → http://localhost:8080/v1/swagger-ui/"
+	@echo ""
+	@echo "Run 'make stop' to kill both servers."
+	@wait
+
+stop:
+	@echo "Stopping servers on ports 8080 and 3000..."
+	@-lsof -ti :8080 | xargs kill -9 2>/dev/null; true
+	@-lsof -ti :3000 | xargs kill -9 2>/dev/null; true
+	@echo "✓ Servers stopped."
+
 dev-api:
 	cd api && cargo run
 
