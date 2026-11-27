@@ -232,12 +232,14 @@ onedegree/
    - Passwords hashed with **Argon2id** (minimum 8 characters).
    - Email is lowercased across all registration and login queries.
    - If an email already belongs to a Google account, registration/login rejects with `"This email is registered with Google. Please sign in with Google."`
-   - Same error message for wrong email and wrong password (`"Invalid email or password"`).
+   - Same error message for wrong email and wrong password (`"Invalid email or password"`, HTTP `401`).
+   - **Verified Email Requirement**: `POST /v1/auth/login` requires verified email. A valid email/password for an unverified account returns HTTP `403` with error code `EMAIL_NOT_VERIFIED`, issues no tokens, and sets no cookie. Google sign-ins count as verified when Google's `email_verified` claim is `true`.
    - Password hashes are **never logged or returned** in any API response.
-   - Login and registration requests are **rate limited** via in-memory sliding window limiter.
-2. **Email Verification & Password Reset**:
-   - Verification and reset tokens are cryptographically random, stored hashed (SHA-256), single-use (`used_at`), with explicit expiration.
-   - Mailer trait abstracts email delivery; ConsoleMailer logs links for local development.
+   - Login, registration, and verification-resend requests are **rate limited** via in-memory sliding window limiter.
+2. **Email Verification, Resend & Password Reset**:
+   - Verification and reset tokens are cryptographically random, stored hashed (SHA-256), single-use (`used_at`), with explicit expiration (24h verification, 1h reset).
+   - `POST /v1/auth/resend-verification` always returns a generic `200 OK` whether or not the account exists, enforces per-IP and per-email rate limits plus a 60-second per-email cooldown, and invalidates earlier unused verification tokens when issuing a new one.
+   - `MAILER` selects `console` (default for `development`/`local`/`test`), `file` (`local`/`test` only, writing JSONL to `/tmp/onedegree-mail-outbox.jsonl` with mode `0600`), or `resend` (`resend-rs`). Missing or unknown `APP_ENV` fails closed as `production`, refusing `console`/`file` and requiring `resend` + HTTPS `WEB_BASE_URL`.
 3. **Role & Admin Privileges**:
    - `ADMIN_EMAILS` read from environment (e.g. `sohelhussaing@gmail.com`).
    - A user is granted `role = 'admin'` **only upon verified email** (Google `email_verified == true` or confirmed password email verification token).
@@ -264,8 +266,9 @@ onedegree/
 |---|---|---|---|
 | `POST` | `/v1/auth/google` | Verify Google ID token, link identity, issue tokens | No |
 | `POST` | `/v1/auth/register` | Register with email & password (Argon2id, min 8 chars, rate-limited) | No |
-| `POST` | `/v1/auth/login` | Login with email & password (rate-limited, single error message) | No |
+| `POST` | `/v1/auth/login` | Login with email & password (rate-limited, requires verified email or 403 `EMAIL_NOT_VERIFIED`) | No |
 | `POST` | `/v1/auth/verify-email` | Verify email token (single-use; promotes verified admin emails) | No |
+| `POST` | `/v1/auth/resend-verification` | Resend verification link (generic 200, 60s cooldown, invalidates old tokens) | No |
 | `POST` | `/v1/auth/forgot-password` | Dispatch password reset token email via Mailer | No |
 | `POST` | `/v1/auth/reset-password` | Reset password using single-use token & revoke sessions | No |
 | `POST` | `/v1/auth/refresh` | Rotate refresh token (httpOnly cookie, replay defense) | No |
