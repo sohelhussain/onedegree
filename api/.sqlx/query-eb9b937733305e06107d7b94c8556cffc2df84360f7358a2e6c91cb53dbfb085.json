@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                        UPDATE users\n                        SET role = 'admin', email_verified_at = COALESCE(email_verified_at, now())\n                        WHERE id = $1\n                        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "eb9b937733305e06107d7b94c8556cffc2df84360f7358a2e6c91cb53dbfb085"
+}
