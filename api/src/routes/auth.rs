@@ -1,6 +1,6 @@
 use axum::{
     Json,
-    extract::Extension,
+    extract::{ConnectInfo, Extension},
     http::{
         HeaderMap, StatusCode,
         header::{COOKIE, ORIGIN, SET_COOKIE},
@@ -9,6 +9,7 @@ use axum::{
 };
 use chrono::{Duration, Utc};
 use serde::Deserialize;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use utoipa::ToSchema;
 
@@ -77,13 +78,63 @@ fn verify_csrf_origin(headers: &HeaderMap, allowed_origin: &str) -> Result<(), A
     Ok(())
 }
 
-fn get_client_ip(headers: &HeaderMap) -> String {
-    headers
-        .get("x-forwarded-for")
-        .and_then(|h| h.to_str().ok())
-        .and_then(|s| s.split(',').next())
-        .map(|s| s.trim().to_string())
+const MAX_EMAIL_CHARS: usize = 254;
+const MAX_EMAIL_LOCAL_CHARS: usize = 64;
+const MAX_NAME_CHARS: usize = 100;
+
+fn get_client_ip(connect_info: Option<Extension<ConnectInfo<SocketAddr>>>) -> String {
+    // Do not trust spoofable X-Forwarded-For headers from direct peers.
+    connect_info
+        .map(|Extension(ConnectInfo(addr))| addr.ip().to_string())
         .unwrap_or_else(|| "127.0.0.1".to_string())
+}
+
+fn validate_and_normalize_email(raw: &str) -> Result<String, ApiError> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed.len() > MAX_EMAIL_CHARS {
+        return Err(ApiError::BadRequest("Invalid email address".into()));
+    }
+    if !trimmed.is_ascii() || trimmed.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return Err(ApiError::BadRequest("Invalid email address".into()));
+    }
+    let Some((local, domain)) = trimmed.split_once('@') else {
+        return Err(ApiError::BadRequest("Invalid email address".into()));
+    };
+    if local.is_empty()
+        || local.len() > MAX_EMAIL_LOCAL_CHARS
+        || domain.is_empty()
+        || domain.contains('@')
+        || !domain.contains('.')
+        || domain.starts_with('.')
+        || domain.ends_with('.')
+        || domain.contains("..")
+        || domain.split('.').any(str::is_empty)
+    {
+        return Err(ApiError::BadRequest("Invalid email address".into()));
+    }
+    Ok(trimmed.to_ascii_lowercase())
+}
+
+fn validate_and_normalize_name(raw: Option<String>) -> Result<Option<String>, ApiError> {
+    let Some(name) = raw else {
+        return Ok(None);
+    };
+    if name.chars().any(|c| c.is_control()) {
+        return Err(ApiError::BadRequest(
+            "Name contains invalid control characters".into(),
+        ));
+    }
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    if trimmed.chars().count() > MAX_NAME_CHARS {
+        return Err(ApiError::BadRequest(format!(
+            "Name must be {} characters or fewer",
+            MAX_NAME_CHARS
+        )));
+    }
+    Ok(Some(trimmed.to_string()))
 }
 
 fn extract_refresh_token(headers: &HeaderMap, body: &RefreshRequest) -> Option<String> {
@@ -289,11 +340,11 @@ pub async fn google_auth(
 )]
 pub async fn register(
     Extension(state): Extension<Arc<AppState>>,
-    headers: HeaderMap,
+    connect_info: Option<Extension<ConnectInfo<SocketAddr>>>,
     Json(payload): Json<RegisterRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
-    // 1. Rate limiting
-    let ip = get_client_ip(&headers);
+    // 1. Rate limiting (peer socket IP; ignores spoofed X-Forwarded-For)
+    let ip = get_client_ip(connect_info);
     state
         .rate_limiter
         .check(
@@ -303,17 +354,10 @@ pub async fn register(
         )
         .await?;
 
-    // 2. Validate password length (minimum 8 characters)
-    if payload.password.len() < 8 {
-        return Err(ApiError::BadRequest(
-            "Password must be at least 8 characters long".into(),
-        ));
-    }
-
-    let email = payload.email.trim().to_lowercase();
-    if email.is_empty() || !email.contains('@') {
-        return Err(ApiError::BadRequest("Invalid email address".into()));
-    }
+    // 2. Validate email, name, and password length BEFORE Argon2 hashing
+    let email = validate_and_normalize_email(&payload.email)?;
+    let full_name = validate_and_normalize_name(payload.full_name)?;
+    password::validate_password_length(&payload.password)?;
 
     // 3. Reject if email belongs to an existing Google account
     let google_account = sqlx::query!(
@@ -357,7 +401,7 @@ pub async fn register(
         "#,
         email,
         password_hash,
-        payload.full_name
+        full_name
     )
     .fetch_one(&mut *tx)
     .await?;
@@ -413,11 +457,11 @@ pub async fn register(
 )]
 pub async fn login(
     Extension(state): Extension<Arc<AppState>>,
-    headers: HeaderMap,
+    connect_info: Option<Extension<ConnectInfo<SocketAddr>>>,
     Json(payload): Json<LoginRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
-    // 1. Rate limiting
-    let ip = get_client_ip(&headers);
+    // 1. Rate limiting (peer socket IP; ignores spoofed X-Forwarded-For)
+    let ip = get_client_ip(connect_info);
     state
         .rate_limiter
         .check(
@@ -427,6 +471,12 @@ pub async fn login(
         )
         .await?;
 
+    // Reject oversized/control inputs BEFORE touching DB or Argon2id
+    if payload.email.trim().len() > MAX_EMAIL_CHARS
+        || password::validate_password_length(&payload.password).is_err()
+    {
+        return Err(ApiError::Unauthorized("Invalid email or password".into()));
+    }
     let email = payload.email.trim().to_lowercase();
 
     // 2. Query user by lowercase email
@@ -621,10 +671,10 @@ pub async fn verify_email(
 )]
 pub async fn resend_verification(
     Extension(state): Extension<Arc<AppState>>,
-    headers: HeaderMap,
+    connect_info: Option<Extension<ConnectInfo<SocketAddr>>>,
     Json(payload): Json<ResendVerificationRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let ip = get_client_ip(&headers);
+    let ip = get_client_ip(connect_info);
     state
         .rate_limiter
         .check(
@@ -634,10 +684,7 @@ pub async fn resend_verification(
         )
         .await?;
 
-    let email = payload.email.trim().to_lowercase();
-    if email.is_empty() || !email.contains('@') {
-        return Err(ApiError::BadRequest("Invalid email address".into()));
-    }
+    let email = validate_and_normalize_email(&payload.email)?;
 
     state
         .rate_limiter
@@ -739,9 +786,29 @@ pub async fn resend_verification(
 )]
 pub async fn forgot_password(
     Extension(state): Extension<Arc<AppState>>,
+    connect_info: Option<Extension<ConnectInfo<SocketAddr>>>,
     Json(payload): Json<ForgotPasswordRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let email = payload.email.trim().to_lowercase();
+    let ip = get_client_ip(connect_info);
+    state
+        .rate_limiter
+        .check(
+            &format!("forgot_password:ip:{}", ip),
+            20,
+            std::time::Duration::from_secs(60),
+        )
+        .await?;
+
+    let email = validate_and_normalize_email(&payload.email)?;
+
+    state
+        .rate_limiter
+        .check(
+            &format!("forgot_password:email:{}", email),
+            5,
+            std::time::Duration::from_secs(900),
+        )
+        .await?;
 
     let user = sqlx::query!(
         "SELECT id, password_hash FROM users WHERE LOWER(email) = $1",
@@ -807,11 +874,7 @@ pub async fn reset_password(
     Extension(state): Extension<Arc<AppState>>,
     Json(payload): Json<ResetPasswordRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
-    if payload.new_password.len() < 8 {
-        return Err(ApiError::BadRequest(
-            "New password must be at least 8 characters long".into(),
-        ));
-    }
+    password::validate_password_length(&payload.new_password)?;
 
     let token_hash = jwt::hash_refresh_token(&payload.token);
     let mut tx = state.pool.begin().await?;

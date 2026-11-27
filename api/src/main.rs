@@ -4,7 +4,10 @@ use std::time::Duration;
 use tracing::{error, info};
 
 use api::{
-    AppState, GoogleVerifier, config::Config, create_router, mailer::build_mailer,
+    AppState, GoogleVerifier,
+    config::Config,
+    create_router,
+    mailer::{build_mailer, startup_mailer_notice},
     rate_limiter::RateLimiter,
 };
 
@@ -34,6 +37,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         error!("FATAL: Mailer configuration error: {}", err);
         err
     })?;
+    info!("{}", startup_mailer_notice(&config));
 
     info!("Connecting to PostgreSQL database...");
 
@@ -72,7 +76,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
 
     Ok(())
 }

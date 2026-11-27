@@ -7,12 +7,81 @@ use std::fs::{OpenOptions, Permissions};
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 use tracing::{error, info};
 
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
 use crate::config::{AppEnv, Config, MailerKind};
+
+const DEFAULT_RESEND_TIMEOUT: Duration = Duration::from_secs(10);
+
+pub fn extract_email_domain(raw: &str) -> String {
+    let trimmed = raw.trim().trim_end_matches('>').trim();
+    trimmed
+        .rsplit_once('@')
+        .map(|(_, dom)| dom.trim().to_string())
+        .filter(|dom| !dom.is_empty())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+pub fn startup_mailer_notice(config: &Config) -> String {
+    match config.mailer {
+        MailerKind::Console => {
+            "MAILER=console: no real emails are sent; verification and reset links are printed in this terminal".to_string()
+        }
+        MailerKind::Resend => {
+            let domain = extract_email_domain(config.mail_from.as_deref().unwrap_or(""));
+            format!("mail via Resend, from {}", domain)
+        }
+        MailerKind::File => {
+            format!("MAILER=file: writing test emails to {}", config.mail_outbox_path)
+        }
+    }
+}
+
+fn redact_tokens_and_keys(input: &str, api_key: &str) -> String {
+    let mut out = if !api_key.trim().is_empty() {
+        input.replace(api_key.trim(), "[REDACTED_KEY]")
+    } else {
+        input.to_string()
+    };
+
+    // Redact any Resend-style API key fragments if echoed
+    let mut redacted_keys = String::with_capacity(out.len());
+    let mut rest = out.as_str();
+    while let Some(pos) = rest.find("re_") {
+        redacted_keys.push_str(&rest[..pos]);
+        let after = &rest[pos + 3..];
+        let token_len = after
+            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-'))
+            .unwrap_or(after.len());
+        if token_len >= 6 {
+            redacted_keys.push_str("re_[REDACTED]");
+        } else {
+            redacted_keys.push_str(&rest[pos..pos + 3 + token_len]);
+        }
+        rest = &after[token_len..];
+    }
+    redacted_keys.push_str(rest);
+    out = redacted_keys;
+
+    // Redact any query token= values or verification/reset links if echoed
+    let mut redacted_tokens = String::with_capacity(out.len());
+    let mut rem = out.as_str();
+    while let Some(pos) = rem.find("token=") {
+        redacted_tokens.push_str(&rem[..pos + 6]);
+        let after = &rem[pos + 6..];
+        let tok_end = after
+            .find(|c: char| c.is_whitespace() || matches!(c, '&' | '"' | '\'' | '<' | '>'))
+            .unwrap_or(after.len());
+        redacted_tokens.push_str("[REDACTED_TOKEN]");
+        rem = &after[tok_end..];
+    }
+    redacted_tokens.push_str(rem);
+    redacted_tokens
+}
 
 #[async_trait]
 pub trait Mailer: Send + Sync {
@@ -167,8 +236,10 @@ impl Mailer for FileMailer {
 #[derive(Clone)]
 pub struct ResendMailer {
     client: Resend,
+    api_key: String,
     from: String,
     web_base_url: String,
+    timeout: Duration,
 }
 
 impl ResendMailer {
@@ -178,6 +249,22 @@ impl ResendMailer {
         web_base_url: impl Into<String>,
         base_url: Option<&str>,
     ) -> Result<Self, String> {
+        Self::with_timeout(
+            api_key,
+            from,
+            web_base_url,
+            base_url,
+            DEFAULT_RESEND_TIMEOUT,
+        )
+    }
+
+    pub fn with_timeout(
+        api_key: &str,
+        from: impl Into<String>,
+        web_base_url: impl Into<String>,
+        base_url: Option<&str>,
+        timeout: Duration,
+    ) -> Result<Self, String> {
         if api_key.trim().is_empty() {
             return Err("RESEND_API_KEY cannot be empty".to_string());
         }
@@ -186,22 +273,21 @@ impl ResendMailer {
             return Err("MAIL_FROM cannot be empty".to_string());
         }
 
-        let client = match base_url {
-            Some(url_str) if !url_str.trim().is_empty() => {
-                let parsed = url_str
-                    .trim()
-                    .parse()
-                    .map_err(|e| format!("Invalid RESEND_BASE_URL: {}", e))?;
-                let cfg = ConfigBuilder::new(api_key).base_url(parsed).build();
-                Resend::with_config(cfg)
-            }
-            _ => Resend::new(api_key),
-        };
+        let mut cfg = ConfigBuilder::new(api_key);
+        if let Some(url_str) = base_url.filter(|s| !s.trim().is_empty()) {
+            let parsed = url_str
+                .trim()
+                .parse()
+                .map_err(|e| format!("Invalid RESEND_BASE_URL: {}", e))?;
+            cfg = cfg.base_url(parsed);
+        }
 
         Ok(Self {
-            client,
+            client: Resend::with_config(cfg.build()),
+            api_key: api_key.to_string(),
             from: from_str,
             web_base_url: web_base_url.into(),
+            timeout,
         })
     }
 
@@ -216,13 +302,79 @@ impl ResendMailer {
             .with_text(text_body)
             .with_html(html_body);
 
-        self.client.emails.send(email).await.map_err(|e| {
-            // Never log API keys, tokens, or links when MAILER=resend
-            error!("Resend API dispatch error for template '{}'", subject);
-            format!("Resend send failed: {}", e)
-        })?;
-
-        Ok(())
+        match tokio::time::timeout(self.timeout, self.client.emails.send(email)).await {
+            Ok(Ok(resp)) => {
+                info!(
+                    "Resend send succeeded: template='{}' status=200 id='{}'",
+                    subject, resp.id
+                );
+                Ok(())
+            }
+            Ok(Err(err)) => {
+                let (status_str, err_name, err_msg) = match &err {
+                    resend_rs::Error::Resend(resp) => (
+                        resp.status_code.to_string(),
+                        resp.name.clone(),
+                        resp.message.clone(),
+                    ),
+                    resend_rs::Error::RateLimit {
+                        ratelimit_limit,
+                        ratelimit_remaining,
+                        ratelimit_reset,
+                    } => (
+                        "429".to_string(),
+                        "rate_limit_exceeded".to_string(),
+                        format!(
+                            "limit={:?} remaining={:?} reset={:?}",
+                            ratelimit_limit, ratelimit_remaining, ratelimit_reset
+                        ),
+                    ),
+                    resend_rs::Error::Http(http_err) => {
+                        let status = http_err
+                            .status()
+                            .map(|s| s.as_u16().to_string())
+                            .unwrap_or_else(|| "network_error".to_string());
+                        let name = if http_err.is_timeout() {
+                            "timeout".to_string()
+                        } else {
+                            "http_error".to_string()
+                        };
+                        (status, name, http_err.to_string())
+                    }
+                    resend_rs::Error::Parse { message, .. } => (
+                        "parse_error".to_string(),
+                        "parse_error".to_string(),
+                        message.clone(),
+                    ),
+                    resend_rs::Error::Other(msg) => (
+                        "unknown".to_string(),
+                        "resend_other".to_string(),
+                        msg.clone(),
+                    ),
+                };
+                let safe_name = redact_tokens_and_keys(&err_name, &self.api_key);
+                let safe_msg = redact_tokens_and_keys(&err_msg, &self.api_key);
+                error!(
+                    "Resend API error: template='{}' status={} name='{}' message='{}'",
+                    subject, status_str, safe_name, safe_msg
+                );
+                Err(format!(
+                    "Resend failed (status={}, name={}, message={})",
+                    status_str, safe_name, safe_msg
+                ))
+            }
+            Err(_) => {
+                error!(
+                    "Resend API error: template='{}' status=timeout name='timeout' message='Resend request timed out after {}s'",
+                    subject,
+                    self.timeout.as_secs()
+                );
+                Err(format!(
+                    "Resend failed (status=timeout, name=timeout, message=request timed out after {}s)",
+                    self.timeout.as_secs()
+                ))
+            }
+        }
     }
 }
 
@@ -436,6 +588,162 @@ mod tests {
                 .unwrap()
                 .contains("https://1degree.fit/reset-password?token=secret_rst_token")
         );
+
+        server_handle.abort();
+    }
+
+    #[test]
+    fn test_startup_mailer_notice_variants() {
+        let console_cfg = Config::try_from_lookup(|k| match k {
+            "APP_ENV" => Some("development".to_string()),
+            "CORS_ORIGIN" => Some("http://localhost:3000".to_string()),
+            "MAILER" => Some("console".to_string()),
+            _ => None,
+        })
+        .unwrap();
+        assert_eq!(
+            startup_mailer_notice(&console_cfg),
+            "MAILER=console: no real emails are sent; verification and reset links are printed in this terminal"
+        );
+
+        let resend_cfg = Config::try_from_lookup(|k| match k {
+            "APP_ENV" => Some("development".to_string()),
+            "CORS_ORIGIN" => Some("http://localhost:3000".to_string()),
+            "MAILER" => Some("resend".to_string()),
+            "RESEND_API_KEY" => Some("re_test_dummy_123456".to_string()),
+            "MAIL_FROM" => Some("1degree <onboarding@resend.dev>".to_string()),
+            _ => None,
+        })
+        .unwrap();
+        assert_eq!(
+            startup_mailer_notice(&resend_cfg),
+            "mail via Resend, from resend.dev"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_resend_mailer_handles_http_errors_timeout_and_malformed_body_without_leaking_secrets()
+     {
+        use axum::http::StatusCode;
+        use axum::response::IntoResponse;
+
+        #[derive(Clone, Default)]
+        struct MockMode {
+            mode: Arc<Mutex<String>>,
+        }
+
+        async fn handle_mock(State(st): State<MockMode>) -> impl IntoResponse {
+            let mode = st.mode.lock().await.clone();
+            match mode.as_str() {
+                "401" => (
+                    StatusCode::UNAUTHORIZED,
+                    Json(json!({
+                        "statusCode": 401,
+                        "name": "missing_api_key",
+                        "message": "Invalid key re_super_secret_key_99999 and token=super_tok_abc"
+                    })),
+                )
+                    .into_response(),
+                "403" => (
+                    StatusCode::FORBIDDEN,
+                    Json(json!({
+                        "statusCode": 403,
+                        "name": "validation_error",
+                        "message": "You can only send testing emails to your own email address."
+                    })),
+                )
+                    .into_response(),
+                "422" => (
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    Json(json!({
+                        "statusCode": 422,
+                        "name": "invalid_from_address",
+                        "message": "The from address is not verified."
+                    })),
+                )
+                    .into_response(),
+                "429" => (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    [
+                        ("ratelimit-limit", "10"),
+                        ("ratelimit-remaining", "0"),
+                        ("ratelimit-reset", "1"),
+                    ],
+                    Json(json!({
+                        "statusCode": 429,
+                        "name": "rate_limit_exceeded",
+                        "message": "Too many requests"
+                    })),
+                )
+                    .into_response(),
+                "500" => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({
+                        "statusCode": 500,
+                        "name": "application_error",
+                        "message": "Internal Resend upstream error"
+                    })),
+                )
+                    .into_response(),
+                "malformed" => (StatusCode::OK, "{not-valid-json").into_response(),
+                "timeout" => {
+                    tokio::time::sleep(Duration::from_millis(400)).await;
+                    (StatusCode::OK, Json(json!({ "id": "late_id" }))).into_response()
+                }
+                _ => (StatusCode::OK, Json(json!({ "id": "ok" }))).into_response(),
+            }
+        }
+
+        let state = MockMode::default();
+        let app = Router::new()
+            .route("/emails", post(handle_mock))
+            .with_state(state.clone());
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server_handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let secret_key = "re_super_secret_key_99999";
+        let secret_tok = "super_tok_abc";
+        let mailer = ResendMailer::with_timeout(
+            secret_key,
+            "onboarding@resend.dev",
+            "https://1degree.fit",
+            Some(&format!("http://{}", addr)),
+            Duration::from_millis(120),
+        )
+        .unwrap();
+
+        for case in ["401", "403", "422", "429", "500", "malformed", "timeout"] {
+            *state.mode.lock().await = case.to_string();
+            let err = mailer
+                .send_verification_email("qa@example.test", secret_tok)
+                .await
+                .expect_err(&format!("case {} must fail cleanly", case));
+
+            assert!(
+                !err.contains(secret_key),
+                "case {} leaked API key: {}",
+                case,
+                err
+            );
+            assert!(
+                !err.contains(secret_tok),
+                "case {} leaked verification token: {}",
+                case,
+                err
+            );
+            if case != "malformed" && case != "429" {
+                assert!(
+                    err.contains(case),
+                    "case {} error missing status context: {}",
+                    case,
+                    err
+                );
+            }
+        }
 
         server_handle.abort();
     }

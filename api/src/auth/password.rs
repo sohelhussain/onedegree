@@ -5,7 +5,29 @@ use argon2::{
 
 use crate::errors::ApiError;
 
+pub const MIN_PASSWORD_CHARS: usize = 8;
+pub const MAX_PASSWORD_CHARS: usize = 128;
+const MAX_PASSWORD_BYTES: usize = MAX_PASSWORD_CHARS * 4;
+
+pub fn validate_password_length(password: &str) -> Result<(), ApiError> {
+    if password.len() > MAX_PASSWORD_BYTES {
+        return Err(ApiError::BadRequest(format!(
+            "Password must be between {} and {} characters long",
+            MIN_PASSWORD_CHARS, MAX_PASSWORD_CHARS
+        )));
+    }
+    let char_count = password.chars().count();
+    if !(MIN_PASSWORD_CHARS..=MAX_PASSWORD_CHARS).contains(&char_count) {
+        return Err(ApiError::BadRequest(format!(
+            "Password must be between {} and {} characters long",
+            MIN_PASSWORD_CHARS, MAX_PASSWORD_CHARS
+        )));
+    }
+    Ok(())
+}
+
 pub fn hash_password(password: &str) -> Result<String, ApiError> {
+    validate_password_length(password)?;
     let argon2 = Argon2::default();
     let hash = argon2
         .hash_password(password.as_bytes())
@@ -14,6 +36,9 @@ pub fn hash_password(password: &str) -> Result<String, ApiError> {
 }
 
 pub fn verify_password(password: &str, password_hash: &str) -> Result<bool, ApiError> {
+    if password.len() > MAX_PASSWORD_BYTES || password.chars().count() > MAX_PASSWORD_CHARS {
+        return Ok(false);
+    }
     let parsed_hash = argon2::password_hash::phc::PasswordHash::new(password_hash)
         .map_err(|e| ApiError::Internal(format!("Failed to parse password hash: {}", e)))?;
     Ok(Argon2::default()
