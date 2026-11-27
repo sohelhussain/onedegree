@@ -45,6 +45,16 @@ function CheckEmailView() {
           </p>
         </div>
 
+        {process.env.NODE_ENV === "development" && (
+          <div
+            data-testid="dev-mailer-hint"
+            className="rounded-xl bg-amber-500/10 border border-amber-500/30 p-3 text-xs text-amber-200 text-left"
+          >
+            Dev mode: no real email is sent. Copy the verification link from the terminal running{" "}
+            <code className="font-mono">make dev</code>.
+          </div>
+        )}
+
         <div className="space-y-3 text-left">
           {!initialEmail && (
             <div className="space-y-1.5">

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { resendVerificationApi } from "@/lib/api";
 import { toast } from "sonner";
 import { Loader2, MailCheck } from "lucide-react";
@@ -18,6 +18,7 @@ export function ResendVerificationButton({
 }) {
   const [cooldown, setCooldown] = useState(initialCooldown);
   const [isSending, setIsSending] = useState(false);
+  const sendingRef = useRef(false);
 
   useEffect(() => {
     if (cooldown <= 0) return;
@@ -29,7 +30,8 @@ export function ResendVerificationButton({
 
   const handleResend = async () => {
     const trimmed = email.trim();
-    if (!trimmed || cooldown > 0 || isSending) return;
+    if (!trimmed || cooldown > 0 || isSending || sendingRef.current) return;
+    sendingRef.current = true;
     setIsSending(true);
     try {
       const res = await resendVerificationApi(trimmed);
@@ -39,6 +41,7 @@ export function ResendVerificationButton({
       const msg = err instanceof Error ? err.message : "Could not resend verification email";
       toast.error(msg);
     } finally {
+      sendingRef.current = false;
       setIsSending(false);
     }
   };

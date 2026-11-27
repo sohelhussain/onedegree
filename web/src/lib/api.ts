@@ -103,7 +103,12 @@ export async function apiClient<T>(
     credentials: "include",
   };
 
-  let response = await fetch(url, fetchOptions);
+  let response: Response;
+  try {
+    response = await fetch(url, fetchOptions);
+  } catch {
+    throw new Error("Unable to reach authentication server. Please check your connection.");
+  }
 
   const isAuthEndpoint = endpoint.includes("/auth/");
   if (response.status === 401 && !isAuthEndpoint) {

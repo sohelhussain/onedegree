@@ -1,6 +1,6 @@
 "use client";
 
-import { Suspense, useEffect, useState } from "react";
+import { Suspense, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useAuth } from "@/lib/auth-context";
@@ -23,6 +23,7 @@ function LoginView() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const submittingRef = useRef(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [needsVerificationEmail, setNeedsVerificationEmail] = useState<string | null>(null);
 
@@ -34,6 +35,7 @@ function LoginView() {
 
   const handleEmailSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (submittingRef.current) return;
     setErrorMessage(null);
     setNeedsVerificationEmail(null);
 
@@ -47,6 +49,7 @@ function LoginView() {
       return;
     }
 
+    submittingRef.current = true;
     setSubmitting(true);
     try {
       await loginWithEmail(submittedEmail, submittedPassword);
@@ -62,6 +65,7 @@ function LoginView() {
         toast.error(msg);
       }
     } finally {
+      submittingRef.current = false;
       setSubmitting(false);
     }
   };

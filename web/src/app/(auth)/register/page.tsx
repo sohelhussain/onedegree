@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { registerAccount } from "@/lib/api";
@@ -16,6 +16,7 @@ export default function RegisterPage() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const submittingRef = useRef(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   if (!enabled) {
@@ -40,6 +41,7 @@ export default function RegisterPage() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (submittingRef.current) return;
     setErrorMessage(null);
 
     const trimmedEmail = email.trim();
@@ -49,11 +51,12 @@ export default function RegisterPage() {
     setEmail("");
     setPassword("");
 
-    if (submittedPassword.length < 8) {
-      setErrorMessage("Password must be at least 8 characters long.");
+    if (submittedPassword.length < 8 || submittedPassword.length > 128) {
+      setErrorMessage("Password must be between 8 and 128 characters long.");
       return;
     }
 
+    submittingRef.current = true;
     setSubmitting(true);
     try {
       await registerAccount({
@@ -68,6 +71,7 @@ export default function RegisterPage() {
       setErrorMessage(msg);
       toast.error(msg);
     } finally {
+      submittingRef.current = false;
       setSubmitting(false);
     }
   };
