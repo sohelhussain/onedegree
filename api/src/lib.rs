@@ -9,12 +9,14 @@ pub mod routes;
 use axum::{
     Json, Router,
     extract::Extension,
+    http::{HeaderValue, Method, header},
     routing::{get, post},
 };
 use serde_json::{Value, json};
 use sqlx::PgPool;
 use std::sync::Arc;
-use tower_http::cors::{Any, CorsLayer};
+use std::time::Duration;
+use tower_http::cors::{AllowCredentials, CorsLayer};
 use tower_http::trace::TraceLayer;
 use utoipa::{
     Modify, OpenApi,
@@ -118,10 +120,28 @@ pub async fn health_check() -> Json<Value> {
 }
 
 pub fn create_router(app_state: Arc<AppState>) -> Router {
+    let origin_header: HeaderValue = app_state
+        .config
+        .cors_origin
+        .parse()
+        .expect("Valid CORS_ORIGIN header value");
+
+    let allowed_origin_for_creds = origin_header.clone();
     let cors = CorsLayer::new()
-        .allow_origin(Any)
-        .allow_methods(Any)
-        .allow_headers(Any);
+        .allow_origin([origin_header])
+        .allow_credentials(AllowCredentials::predicate(move |origin, _| {
+            origin == allowed_origin_for_creds
+        }))
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::PATCH,
+            Method::DELETE,
+            Method::OPTIONS,
+        ])
+        .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION])
+        .max_age(Duration::from_secs(86400))
+        .vary(vec![header::ORIGIN]);
 
     Router::new()
         .route("/health", get(health_check))
@@ -149,6 +169,6 @@ pub fn create_router(app_state: Arc<AppState>) -> Router {
         .route("/v1/home", get(routes::home::get_home))
         .merge(SwaggerUi::new("/v1/swagger-ui").url("/v1/api-docs/openapi.json", ApiDoc::openapi()))
         .layer(Extension(app_state))
-        .layer(cors)
         .layer(TraceLayer::new_for_http())
+        .layer(cors)
 }

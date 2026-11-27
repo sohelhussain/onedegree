@@ -3,7 +3,7 @@ use axum::{
     body::Body,
     http::{
         Request, StatusCode,
-        header::{AUTHORIZATION, CONTENT_TYPE, COOKIE, SET_COOKIE},
+        header::{AUTHORIZATION, CONTENT_TYPE, COOKIE, ORIGIN, SET_COOKIE},
     },
 };
 use chrono::{Duration, Utc};
@@ -706,4 +706,263 @@ async fn test_duration_check() {
 
     assert_eq!(home_json["planned_minutes"].as_i64().unwrap(), 75);
     assert_eq!(home_json["completed_minutes"].as_i64().unwrap(), 0);
+}
+
+#[tokio::test]
+async fn test_cors_allowed_origin_and_preflight() {
+    let (app, _) = setup_test_app().await;
+
+    // 1. Preflight OPTIONS request
+    let preflight_req = Request::builder()
+        .method("OPTIONS")
+        .uri("/v1/auth/refresh")
+        .header(ORIGIN, "http://localhost:3000")
+        .header("Access-Control-Request-Method", "POST")
+        .header("Access-Control-Request-Headers", "content-type")
+        .body(Body::empty())
+        .unwrap();
+
+    let preflight_res = app.clone().oneshot(preflight_req).await.unwrap();
+    assert!(
+        preflight_res.status().is_success(),
+        "preflight OPTIONS should succeed, got {}",
+        preflight_res.status()
+    );
+
+    let headers = preflight_res.headers();
+    assert_eq!(
+        headers.get("access-control-allow-origin").unwrap(),
+        "http://localhost:3000"
+    );
+    assert_eq!(
+        headers.get("access-control-allow-credentials").unwrap(),
+        "true"
+    );
+    assert!(headers.contains_key("access-control-allow-methods"));
+    assert!(headers.contains_key("access-control-allow-headers"));
+    assert!(headers.contains_key("access-control-max-age"));
+    let allow_origin = headers
+        .get("access-control-allow-origin")
+        .unwrap()
+        .to_str()
+        .unwrap();
+    assert_ne!(
+        allow_origin, "*",
+        "wildcard must never be used in access-control-allow-origin"
+    );
+
+    // 2. Simple GET request with allowed origin
+    let get_req = Request::builder()
+        .method("GET")
+        .uri("/health")
+        .header(ORIGIN, "http://localhost:3000")
+        .body(Body::empty())
+        .unwrap();
+
+    let get_res = app.clone().oneshot(get_req).await.unwrap();
+    assert_eq!(get_res.status(), StatusCode::OK);
+    let get_headers = get_res.headers();
+    assert_eq!(
+        get_headers.get("access-control-allow-origin").unwrap(),
+        "http://localhost:3000"
+    );
+    assert_eq!(
+        get_headers.get("access-control-allow-credentials").unwrap(),
+        "true"
+    );
+    assert!(
+        get_headers
+            .get("vary")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_lowercase()
+            .contains("origin")
+    );
+}
+
+#[tokio::test]
+async fn test_cors_evil_origin_gets_no_cors_headers() {
+    let (app, _) = setup_test_app().await;
+
+    let evil_req = Request::builder()
+        .method("GET")
+        .uri("/health")
+        .header(ORIGIN, "https://evil.example")
+        .body(Body::empty())
+        .unwrap();
+
+    let evil_res = app.oneshot(evil_req).await.unwrap();
+    let headers = evil_res.headers();
+    assert!(
+        headers.get("access-control-allow-origin").is_none(),
+        "evil origin must not receive access-control-allow-origin header"
+    );
+    assert!(
+        headers.get("access-control-allow-credentials").is_none(),
+        "evil origin must not receive access-control-allow-credentials header"
+    );
+}
+
+#[tokio::test]
+async fn test_cors_outermost_layer_error_responses() {
+    let (app, _) = setup_test_app().await;
+
+    // 1. 401 from /v1/auth/refresh with no cookie from allowed origin
+    let req_401 = Request::builder()
+        .method("POST")
+        .uri("/v1/auth/refresh")
+        .header(ORIGIN, "http://localhost:3000")
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from("{}"))
+        .unwrap();
+
+    let res_401 = app.clone().oneshot(req_401).await.unwrap();
+    assert_eq!(res_401.status(), StatusCode::UNAUTHORIZED);
+    let headers_401 = res_401.headers();
+    assert_eq!(
+        headers_401.get("access-control-allow-origin").unwrap(),
+        "http://localhost:3000",
+        "401 error response from allowed origin must include CORS allow-origin"
+    );
+    assert_eq!(
+        headers_401.get("access-control-allow-credentials").unwrap(),
+        "true",
+        "401 error response from allowed origin must include credentials header"
+    );
+
+    // 2. 403 from /v1/auth/refresh with foreign origin
+    let req_403 = Request::builder()
+        .method("POST")
+        .uri("/v1/auth/refresh")
+        .header(ORIGIN, "https://evil.example")
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from("{}"))
+        .unwrap();
+
+    let res_403 = app.clone().oneshot(req_403).await.unwrap();
+    assert_eq!(res_403.status(), StatusCode::FORBIDDEN);
+    let headers_403 = res_403.headers();
+    assert!(
+        headers_403.get("access-control-allow-origin").is_none(),
+        "foreign origin must not receive access-control-allow-origin on 403 response"
+    );
+    assert!(
+        headers_403
+            .get("access-control-allow-credentials")
+            .is_none(),
+        "foreign origin must not receive access-control-allow-credentials on 403 response"
+    );
+}
+
+#[tokio::test]
+async fn test_csrf_foreign_origin_rejected_and_token_preserved() {
+    let (app, state) = setup_test_app().await;
+
+    // 1. Register a test user
+    let email = format!("csrf_test_{}@example.com", Uuid::new_v4());
+
+    let user = sqlx::query!(
+        "INSERT INTO users (email, timezone) VALUES ($1, 'UTC') RETURNING id",
+        email
+    )
+    .fetch_one(&state.pool)
+    .await
+    .unwrap();
+
+    // 2. Insert an active refresh token
+    let raw_refresh = jwt::generate_refresh_token();
+    let token_hash = jwt::hash_refresh_token(&raw_refresh);
+    let expires_at = Utc::now() + Duration::seconds(state.config.jwt_refresh_expiration_secs);
+
+    let token_record = sqlx::query!(
+        r#"
+        INSERT INTO refresh_tokens (user_id, token_hash, expires_at)
+        VALUES ($1, $2, $3)
+        RETURNING id, revoked
+        "#,
+        user.id,
+        token_hash,
+        expires_at
+    )
+    .fetch_one(&state.pool)
+    .await
+    .unwrap();
+
+    assert!(!token_record.revoked, "token must initially be active");
+
+    // 3. Foreign Origin (CSRF attack) attempts refresh
+    let attack_req = Request::builder()
+        .method("POST")
+        .uri("/v1/auth/refresh")
+        .header(ORIGIN, "https://evil.example")
+        .header(COOKIE, format!("refresh_token={}", raw_refresh))
+        .body(Body::empty())
+        .unwrap();
+
+    let attack_res = app.clone().oneshot(attack_req).await.unwrap();
+    assert_eq!(
+        attack_res.status(),
+        StatusCode::FORBIDDEN,
+        "foreign origin refresh must return 403 Forbidden"
+    );
+
+    // 4. Assert token was NOT rotated or revoked in database
+    let checked_token = sqlx::query!(
+        "SELECT revoked FROM refresh_tokens WHERE id = $1",
+        token_record.id
+    )
+    .fetch_one(&state.pool)
+    .await
+    .unwrap();
+
+    assert!(
+        !checked_token.revoked,
+        "refresh token must remain valid and unrevoked after rejected CSRF attempt"
+    );
+
+    // 5. Legitimate request from allowed origin succeeds and rotates token
+    let legit_req = Request::builder()
+        .method("POST")
+        .uri("/v1/auth/refresh")
+        .header(ORIGIN, "http://localhost:3000")
+        .header(COOKIE, format!("refresh_token={}", raw_refresh))
+        .body(Body::empty())
+        .unwrap();
+
+    let legit_res = app.clone().oneshot(legit_req).await.unwrap();
+    assert_eq!(
+        legit_res.status(),
+        StatusCode::OK,
+        "legitimate refresh after blocked attack must succeed"
+    );
+
+    // 6. Old token is now rotated (marked revoked)
+    let post_legit_token = sqlx::query!(
+        "SELECT revoked FROM refresh_tokens WHERE id = $1",
+        token_record.id
+    )
+    .fetch_one(&state.pool)
+    .await
+    .unwrap();
+
+    assert!(
+        post_legit_token.revoked,
+        "token must be rotated and marked revoked after legitimate refresh"
+    );
+
+    // 7. Test logout CSRF rejection
+    let attack_logout_req = Request::builder()
+        .method("POST")
+        .uri("/v1/auth/logout")
+        .header(ORIGIN, "https://evil.example")
+        .body(Body::empty())
+        .unwrap();
+
+    let attack_logout_res = app.oneshot(attack_logout_req).await.unwrap();
+    assert_eq!(
+        attack_logout_res.status(),
+        StatusCode::FORBIDDEN,
+        "foreign origin logout must return 403 Forbidden"
+    );
 }

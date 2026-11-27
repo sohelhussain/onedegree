@@ -3,7 +3,7 @@ use axum::{
     extract::Extension,
     http::{
         HeaderMap, StatusCode,
-        header::{COOKIE, SET_COOKIE},
+        header::{COOKIE, ORIGIN, SET_COOKIE},
     },
     response::IntoResponse,
 };
@@ -56,6 +56,20 @@ pub struct ResetPasswordRequest {
 #[derive(Debug, Deserialize, Default, ToSchema)]
 pub struct RefreshRequest {
     pub refresh_token: Option<String>,
+}
+
+fn verify_csrf_origin(headers: &HeaderMap, allowed_origin: &str) -> Result<(), ApiError> {
+    if let Some(origin_val) = headers.get(ORIGIN) {
+        let origin = origin_val
+            .to_str()
+            .map_err(|_| ApiError::Forbidden("Invalid Origin header".into()))?;
+        if origin != allowed_origin {
+            return Err(ApiError::Forbidden(
+                "Cross-site request forbidden: Origin does not match allowed CORS origin".into(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn get_client_ip(headers: &HeaderMap) -> String {
@@ -716,6 +730,8 @@ pub async fn refresh_token(
     headers: HeaderMap,
     body: Option<Json<RefreshRequest>>,
 ) -> Result<impl IntoResponse, ApiError> {
+    verify_csrf_origin(&headers, &state.config.cors_origin)?;
+
     let req_body = body.map(|b| b.0).unwrap_or_default();
     let raw_token = extract_refresh_token(&headers, &req_body)
         .ok_or_else(|| ApiError::Unauthorized("Missing refresh token in cookie or body".into()))?;
@@ -842,6 +858,8 @@ pub async fn logout(
     headers: HeaderMap,
     body: Option<Json<RefreshRequest>>,
 ) -> Result<impl IntoResponse, ApiError> {
+    verify_csrf_origin(&headers, &state.config.cors_origin)?;
+
     let req_body = body.map(|b| b.0).unwrap_or_default();
     if let Some(raw_token) = extract_refresh_token(&headers, &req_body) {
         let token_hash = jwt::hash_refresh_token(&raw_token);
