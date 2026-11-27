@@ -40,6 +40,7 @@ export function GoogleSignInButton({ onSuccess }: { onSuccess?: () => void }) {
   const initializedRef = useRef(false);
   const [scriptLoaded, setScriptLoaded] = useState(false);
   const [scriptFailed, setScriptFailed] = useState(false);
+  const [fallbackVisible, setFallbackVisible] = useState(false);
   const clientId = process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID || "";
   const hasValidClientId = Boolean(clientId) && !clientId.includes("your-google-client-id");
 
@@ -50,6 +51,28 @@ export function GoogleSignInButton({ onSuccess }: { onSuccess?: () => void }) {
   useEffect(() => {
     onSuccessRef.current = onSuccess;
   }, [onSuccess]);
+
+  useEffect(() => {
+    if (!hasValidClientId) return;
+    if (window.google?.accounts?.id) {
+      Promise.resolve().then(() => setScriptLoaded(true));
+    }
+
+    const timer = window.setTimeout(() => {
+      if (scriptFailed) {
+        setFallbackVisible(true);
+        return;
+      }
+      const container = buttonRef.current;
+      const iframe = container?.querySelector("iframe");
+      const rect = iframe?.getBoundingClientRect();
+      if (!iframe || !rect || rect.height < 20 || rect.width < 40) {
+        setFallbackVisible(true);
+      }
+    }, 4000);
+
+    return () => window.clearTimeout(timer);
+  }, [hasValidClientId, scriptFailed]);
 
   useEffect(() => {
     if (!scriptLoaded || !window.google || !buttonRef.current || !hasValidClientId) {
@@ -79,7 +102,10 @@ export function GoogleSignInButton({ onSuccess }: { onSuccess?: () => void }) {
       initializedRef.current = true;
     } catch {
       toast.error("Google sign-in failed to initialize.");
-      Promise.resolve().then(() => setScriptFailed(true));
+      Promise.resolve().then(() => {
+        setScriptFailed(true);
+        setFallbackVisible(true);
+      });
     }
   }, [scriptLoaded, clientId, hasValidClientId]);
 
@@ -92,32 +118,42 @@ export function GoogleSignInButton({ onSuccess }: { onSuccess?: () => void }) {
           onLoad={() => setScriptLoaded(true)}
           onError={() => {
             setScriptFailed(true);
+            setFallbackVisible(true);
             toast.error("Could not load Google Sign-In script.");
           }}
         />
+      )}
+
+      {!hasValidClientId && (
+        <button
+          type="button"
+          disabled
+          className="min-h-[44px] w-full max-w-[310px] px-4 rounded-full bg-[var(--bg-elevated)] border border-[var(--border-subtle)] text-sm text-[var(--text-muted)] opacity-80 cursor-not-allowed"
+        >
+          Google Sign-In unavailable (client ID not set)
+        </button>
       )}
 
       <div
         ref={buttonRef}
         data-testid="google-signin-container"
         aria-busy={isLoading}
-        className="min-h-[44px] w-full flex items-center justify-center"
-      >
-        {!hasValidClientId && (
-          <button
-            type="button"
-            disabled
-            className="min-h-[44px] w-full max-w-[310px] px-4 rounded-full bg-[var(--bg-elevated)] border border-[var(--border-subtle)] text-sm text-[var(--text-muted)] opacity-80 cursor-not-allowed"
-          >
-            Google Sign-In unavailable (client ID not set)
-          </button>
-        )}
-        {hasValidClientId && scriptFailed && (
-          <p className="text-xs text-[var(--danger)] text-center" role="alert">
-            Unable to load Google Sign-In. Check your connection or try email below.
-          </p>
-        )}
-      </div>
+        className={
+          fallbackVisible
+            ? "hidden"
+            : "min-h-[44px] w-full flex items-center justify-center"
+        }
+      />
+
+      {hasValidClientId && (fallbackVisible || scriptFailed) && (
+        <p
+          data-testid="google-fallback-notice"
+          className="min-h-[44px] w-full max-w-[310px] px-4 py-2.5 rounded-full bg-[var(--bg-elevated)] border border-[var(--border-subtle)] text-xs text-[var(--text-muted)] text-center flex items-center justify-center"
+          role="status"
+        >
+          Google sign-in is unavailable here. Use email instead.
+        </p>
+      )}
     </div>
   );
 }

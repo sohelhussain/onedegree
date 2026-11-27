@@ -125,14 +125,12 @@ function LoginView() {
             </div>
           )}
 
-          {(!emailAuthEnabled || tab === "google") && (
-            <div className="space-y-3 py-2">
-              <GoogleSignInButton onSuccess={() => router.replace(nextPath)} />
-              <p className="text-xs text-center text-[var(--text-muted)]">
-                Quick sign-in with your Google account
-              </p>
-            </div>
-          )}
+          <div className={emailAuthEnabled && tab !== "google" ? "hidden" : "space-y-3 py-2"}>
+            <GoogleSignInButton onSuccess={() => router.replace(nextPath)} />
+            <p className="text-xs text-center text-[var(--text-muted)]">
+              Quick sign-in with your Google account
+            </p>
+          </div>
 
           {emailAuthEnabled && tab === "email" && (
             <form onSubmit={handleEmailSubmit} className="space-y-4" noValidate>
