@@ -1,12 +1,17 @@
-import { RefreshResponse } from "./types";
+import { AuthResponse, MessageResponse, RefreshResponse } from "./types";
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080/v1";
 
 let currentAccessToken: string | null = null;
 let refreshPromise: Promise<string | null> | null = null;
+let unauthorizedHandler: (() => void) | null = null;
 
 export class ApiError extends Error {
-  constructor(message: string, public status?: number) {
+  constructor(
+    message: string,
+    public status?: number,
+    public code?: string
+  ) {
     super(message);
     this.name = "ApiError";
   }
@@ -20,6 +25,27 @@ export function getAccessToken(): string | null {
   return currentAccessToken;
 }
 
+export function setUnauthorizedHandler(handler: (() => void) | null) {
+  unauthorizedHandler = handler;
+}
+
+async function parseErrorResponse(res: Response): Promise<{ message: string; code?: string }> {
+  let message = `HTTP error ${res.status}`;
+  let code: string | undefined;
+  try {
+    const errJson = await res.json();
+    if (errJson?.error?.message) {
+      message = errJson.error.message;
+    }
+    if (errJson?.error?.code) {
+      code = errJson.error.code;
+    }
+  } catch {
+    // ignore json parse error
+  }
+  return { message, code };
+}
+
 export async function refreshAccessToken(): Promise<string | null> {
   if (refreshPromise) {
     return refreshPromise;
@@ -30,21 +56,13 @@ export async function refreshAccessToken(): Promise<string | null> {
       const res = await fetch(`${API_BASE_URL}/auth/refresh`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        credentials: "include", // Sends and receives httpOnly refresh cookie
+        credentials: "include",
       });
 
       if (!res.ok) {
         currentAccessToken = null;
-        let errorMessage = `HTTP error ${res.status}`;
-        try {
-          const errJson = await res.json();
-          if (errJson?.error?.message) {
-            errorMessage = errJson.error.message;
-          }
-        } catch {
-          // ignore json parse error
-        }
-        throw new ApiError(errorMessage, res.status);
+        const { message, code } = await parseErrorResponse(res);
+        throw new ApiError(message, res.status, code);
       }
 
       const data: RefreshResponse = await res.json();
@@ -79,13 +97,13 @@ export async function apiClient<T>(
   const fetchOptions: RequestInit = {
     ...options,
     headers,
-    credentials: "include", // Ensures httpOnly cookies are attached across requests
+    credentials: "include",
   };
 
   let response = await fetch(url, fetchOptions);
 
-  // If unauthorized and we haven't already retried with a refresh
-  if (response.status === 401 && !endpoint.includes("/auth/refresh") && !endpoint.includes("/auth/google")) {
+  const isAuthEndpoint = endpoint.includes("/auth/");
+  if (response.status === 401 && !isAuthEndpoint) {
     try {
       const newAccessToken = await refreshAccessToken();
       if (newAccessToken) {
@@ -96,22 +114,69 @@ export async function apiClient<T>(
         });
       }
     } catch {
-      // Refresh failed, proceed to handle error response below
+      unauthorizedHandler?.();
     }
   }
 
   if (!response.ok) {
-    let errorMessage = `HTTP error ${response.status}`;
-    try {
-      const errJson = await response.json();
-      if (errJson?.error?.message) {
-        errorMessage = errJson.error.message;
-      }
-    } catch {
-      // ignore json parse error
+    const { message, code } = await parseErrorResponse(response);
+    if (response.status === 401 && !isAuthEndpoint) {
+      unauthorizedHandler?.();
     }
-    throw new ApiError(errorMessage, response.status);
+    throw new ApiError(message, response.status, code);
   }
 
   return response.json();
+}
+
+export function registerAccount(payload: {
+  email: string;
+  password: string;
+  full_name?: string;
+}): Promise<MessageResponse> {
+  return apiClient<MessageResponse>("/auth/register", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function loginWithEmailApi(payload: {
+  email: string;
+  password: string;
+}): Promise<AuthResponse> {
+  return apiClient<AuthResponse>("/auth/login", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function verifyEmailApi(token: string): Promise<MessageResponse> {
+  return apiClient<MessageResponse>("/auth/verify-email", {
+    method: "POST",
+    body: JSON.stringify({ token }),
+  });
+}
+
+export function resendVerificationApi(email: string): Promise<MessageResponse> {
+  return apiClient<MessageResponse>("/auth/resend-verification", {
+    method: "POST",
+    body: JSON.stringify({ email }),
+  });
+}
+
+export function forgotPasswordApi(email: string): Promise<MessageResponse> {
+  return apiClient<MessageResponse>("/auth/forgot-password", {
+    method: "POST",
+    body: JSON.stringify({ email }),
+  });
+}
+
+export function resetPasswordApi(payload: {
+  token: string;
+  new_password: string;
+}): Promise<MessageResponse> {
+  return apiClient<MessageResponse>("/auth/reset-password", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
 }
