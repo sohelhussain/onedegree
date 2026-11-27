@@ -20,4 +20,14 @@ export default defineConfig({
     trace: "retain-on-failure",
     screenshot: "only-on-failure",
   },
+  projects: [
+    {
+      name: "chromium",
+      use: { browserName: "chromium" },
+    },
+    {
+      name: "webkit",
+      use: { browserName: "webkit" },
+    },
+  ],
 });

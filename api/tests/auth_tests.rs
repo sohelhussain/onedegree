@@ -545,7 +545,7 @@ async fn test_admin_has_premium() {
     let me_json: Value = serde_json::from_slice(&me_body).unwrap();
 
     assert_eq!(me_json["role"].as_str().unwrap(), "admin");
-    assert_eq!(me_json["has_premium"].as_bool().unwrap(), true);
+    assert!(me_json["has_premium"].as_bool().unwrap());
 }
 
 #[tokio::test]

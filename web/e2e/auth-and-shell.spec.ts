@@ -1,6 +1,17 @@
-import { test, expect, Page, BrowserContext } from "@playwright/test";
+import { test, expect, Page, BrowserContext, Locator } from "@playwright/test";
 import fs from "node:fs";
 import crypto from "node:crypto";
+
+async function fillField(locator: Locator, value: string): Promise<void> {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    await locator.fill(value);
+    await locator.page().waitForTimeout(50);
+    if ((await locator.inputValue()) === value) {
+      return;
+    }
+  }
+  await expect(locator).toHaveValue(value);
+}
 
 const OUTBOX_PATH = process.env.MAIL_OUTBOX_PATH || "/tmp/onedegree-mail-outbox.jsonl";
 const ALLOWED_ORIGINS = new Set([
@@ -126,27 +137,55 @@ async function assertNoTokensInWebStorage(page: Page) {
   expect(storageState.sessionStorageDump).toBe("{}");
 }
 
+function isAllowedExpectedConsoleError(text: string): boolean {
+  return (
+    text.includes("[GSI_LOGGER]: The given origin is not allowed for the given client ID") ||
+    (text.includes("accounts.google.com/gsi/button") && text.includes("403")) ||
+    text.includes("Failed to load resource: the server responded with a status of 403") ||
+    text.includes("Failed to load resource: the server responded with a status of 401 (Unauthorized)")
+  );
+}
+
 test.describe("1degree Auth & Mobile-First Shell", () => {
-  test("login renders at 390px & desktop, captures Google Sign-In diagnostics, and blocks protected routes without flash", async ({
+  test("Honest Boot (a)(b)(c)(f): /login clean at 390px & desktop, 3x reload, refresh headers, 4s Google fallback", async ({
     browser,
-  }) => {
+  }, testInfo) => {
+    const project = testInfo.project.name;
     const context = await browser.newContext({
       viewport: { width: 390, height: 844 },
     });
     const { observedHosts, blockedUrls } = await attachHostGuard(context);
     const page = await context.newPage();
 
-    const consoleErrors: string[] = [];
+    const unexpectedConsoleErrors: string[] = [];
+    const allowedExpectedConsoleErrors: string[] = [];
+    const unexpectedHttpErrors: string[] = [];
     const pageErrors: string[] = [];
+
     page.on("console", (msg) => {
-      if (msg.type() === "error" || msg.text().includes("GSI_LOGGER") || msg.text().includes("origin")) {
-        consoleErrors.push(`[${msg.type()}] ${msg.text()}`);
+      if (msg.type() === "error" || msg.text().includes("GSI_LOGGER")) {
+        const text = msg.text();
+        if (isAllowedExpectedConsoleError(text)) {
+          allowedExpectedConsoleErrors.push(`[${msg.type()}] ${text}`);
+        } else {
+          unexpectedConsoleErrors.push(`[${msg.type()}] ${text}`);
+        }
+      }
+    });
+    page.on("response", (res) => {
+      const status = res.status();
+      if (status >= 400) {
+        const url = res.url();
+        const isExpectedRefresh401 = url.includes("/v1/auth/refresh") && status === 401;
+        const isExpectedGoogle403 = url.includes("accounts.google.com/gsi/button") && status === 403;
+        if (!isExpectedRefresh401 && !isExpectedGoogle403) {
+          unexpectedHttpErrors.push(`${status} ${url}`);
+        }
       }
     });
     page.on("pageerror", (err) => pageErrors.push(err.message));
 
     // Protected route while signed out: must redirect to /login with zero flash of user data
-    let sawProtectedContent = false;
     await page.addInitScript(() => {
       const observer = new MutationObserver(() => {
         const text = document.body?.innerText || "";
@@ -161,49 +200,138 @@ test.describe("1degree Auth & Mobile-First Shell", () => {
 
     await page.goto("/today", { waitUntil: "domcontentloaded" });
     await page.waitForURL(/\/login/);
-    sawProtectedContent = await page.evaluate(
+    const sawProtectedContent = await page.evaluate(
       () => Boolean((window as unknown as { __sawProtectedFlash?: boolean }).__sawProtectedFlash)
     );
     expect(sawProtectedContent).toBe(false);
 
+    // Capture (c) /v1/auth/refresh request & response headers on /login
+    let refreshCapture: {
+      url: string;
+      method: string;
+      status: number;
+      requestHeaders: Record<string, string>;
+      responseHeaders: Record<string, string>;
+    } | null = null;
+
+    page.on("response", async (res) => {
+      if (res.url().includes("/v1/auth/refresh")) {
+        refreshCapture = {
+          url: res.url(),
+          method: res.request().method(),
+          status: res.status(),
+          requestHeaders: await res.request().allHeaders(),
+          responseHeaders: await res.allHeaders(),
+        };
+      }
+    });
+
     await page.goto("/login", { waitUntil: "networkidle" });
     await expect(page.getByText("Stay 1° on course")).toBeVisible();
-    await expect(page.getByTestId("google-signin-container")).toBeVisible();
+    await expect(page.getByTestId("google-signin-container")).toBeAttached();
 
-    // Wait briefly so GSI script / iframe emits any origin or console message
-    await page.waitForTimeout(1500);
-    await page.screenshot({ path: "/tmp/pw-login-390.png", fullPage: true });
+    // Check (f): wait > 4s for Google Sign-In fallback notice, inspect iframe state first
+    await page.waitForTimeout(4300);
+    const gsiDom = await page.getByTestId("google-signin-container").evaluate((el) => {
+      const iframe = el.querySelector("iframe");
+      const rect = iframe?.getBoundingClientRect();
+      return {
+        hasIframe: Boolean(iframe),
+        width: rect?.width ?? 0,
+        height: rect?.height ?? 0,
+      };
+    });
+    console.log(`[${project}] GSI_DOM_4S:`, JSON.stringify(gsiDom));
 
+    await expect(page.getByTestId("google-fallback-notice")).toHaveText(
+      "Google sign-in is unavailable here. Use email instead."
+    );
+
+    // Ensure Email tab remains clickable and usable while Google fallback is displayed,
+    // and switching back preserves the fallback notice without waiting another 4s
+    await page.getByRole("tab", { name: "Email" }).click();
+    await expect(page.getByLabel("Email")).toBeVisible();
+    await expect(page.getByLabel("Password")).toBeVisible();
+    await page.getByRole("tab", { name: "Google" }).click();
+    await expect(page.getByTestId("google-fallback-notice")).toBeVisible();
+
+    // Assert zero error toasts and zero Next.js dev error badge ("1 Issue")
+    await expect(page.locator("[data-sonner-toast][data-type='error']")).toHaveCount(0);
+    await expect(page.getByText("Unable to reach authentication server")).toHaveCount(0);
+    await expect(page.getByText("Load failed")).toHaveCount(0);
+    const nextIssueBadgeCount = await page.locator("nextjs-portal").evaluateAll((portals) => {
+      return portals.filter((p) => {
+        const root = p.shadowRoot || p;
+        const text = root.textContent || "";
+        return /\b\d+\s+Issues?\b/i.test(text);
+      }).length;
+    });
+    expect(nextIssueBadgeCount).toBe(0);
+
+    await page.screenshot({ path: `/tmp/pw-login-${project}-390.png`, fullPage: true });
+
+    // Switch to desktop 1280x800 and check clean rendering
     await page.setViewportSize({ width: 1280, height: 800 });
     await page.waitForTimeout(300);
-    await page.screenshot({ path: "/tmp/pw-login-desktop.png", fullPage: true });
+    await expect(page.getByTestId("google-fallback-notice")).toBeVisible();
+    await page.screenshot({ path: `/tmp/pw-login-${project}-desktop.png`, fullPage: true });
 
-    console.log("GSI_OBSERVED_HOSTS:", JSON.stringify([...observedHosts].sort()));
-    console.log("GSI_BLOCKED_URLS:", JSON.stringify(blockedUrls));
-    console.log("GSI_CONSOLE_LOGS:", JSON.stringify(consoleErrors));
+    // Check (b): reload /login 3 times -> never show auth unreachable or WebKit "Load failed"
+    for (let i = 1; i <= 3; i++) {
+      await page.reload({ waitUntil: "networkidle" });
+      await expect(page.getByText("Unable to reach authentication server")).toHaveCount(0);
+      await expect(page.getByText("Load failed")).toHaveCount(0);
+      await expect(page.locator("[data-sonner-toast][data-type='error']")).toHaveCount(0);
+    }
+
+    expect(refreshCapture).not.toBeNull();
+    console.log(`[${project}] REFRESH_CAPTURE:`, JSON.stringify(refreshCapture));
+    console.log(`[${project}] GSI_OBSERVED_HOSTS:`, JSON.stringify([...observedHosts].sort()));
+    console.log(`[${project}] GSI_BLOCKED_URLS:`, JSON.stringify(blockedUrls));
+    console.log(`[${project}] ALLOWED_EXPECTED_CONSOLE_ERRORS:`, JSON.stringify(allowedExpectedConsoleErrors));
+    console.log(`[${project}] UNEXPECTED_CONSOLE_ERRORS:`, JSON.stringify(unexpectedConsoleErrors));
+    console.log(`[${project}] UNEXPECTED_HTTP_ERRORS:`, JSON.stringify(unexpectedHttpErrors));
+
     expect(pageErrors).toEqual([]);
+    expect(unexpectedConsoleErrors).toEqual([]);
+    expect(unexpectedHttpErrors).toEqual([]);
+    expect(blockedUrls).toEqual([]);
 
     await context.close();
   });
 
-  test("register, unverified block + resend, verify link strips URL, login, reload persistence, tabs, no token storage, logout + Back button", async ({
+  test("register, unverified block + resend, verify link strips URL, login, reload persistence, second tab, Set-Cookie, no token storage, logout + Back button", async ({
     browser,
-  }) => {
+  }, testInfo) => {
+    const project = testInfo.project.name;
     const context = await browser.newContext({
       viewport: { width: 390, height: 844 },
     });
     await attachHostGuard(context);
     const page = await context.newPage();
 
-    const email = makeSyntheticEmail("flow");
+    const email = makeSyntheticEmail(`flow-${project}`);
     const password = makeRandomPassword();
     const startIdx = outboxLineCount();
 
+    let loginSetCookie = "";
+    let refreshSetCookie = "";
+    page.on("response", async (res) => {
+      if (res.url().includes("/v1/auth/login") && res.status() === 200) {
+        const headers = await res.allHeaders();
+        loginSetCookie = headers["set-cookie"] || "";
+      }
+      if (res.url().includes("/v1/auth/refresh") && res.status() === 200) {
+        const headers = await res.allHeaders();
+        refreshSetCookie = headers["set-cookie"] || "";
+      }
+    });
+
     // 1. Register on /register
-    await page.goto("/register");
-    await page.getByLabel("Name (optional)").fill("QA Runner");
-    await page.getByLabel("Email").fill(email);
-    await page.getByLabel("Password (min 8 characters)").fill(password);
+    await page.goto("/register", { waitUntil: "networkidle" });
+    await fillField(page.getByLabel("Name (optional)"), "QA Runner");
+    await fillField(page.getByLabel("Email"), email);
+    await fillField(page.getByLabel("Password (min 8 characters)"), password);
     await page.getByRole("button", { name: "Create account" }).click();
 
     // 2. See /check-email with 60s resend cooldown button
@@ -215,10 +343,10 @@ test.describe("1degree Auth & Mobile-First Shell", () => {
     expect(verMail.url).toMatch(/^http:\/\/localhost:3000\/verify-email\?token=/);
 
     // 3. Attempting login while unverified shows "Verify your email" + Resend button
-    await page.goto("/login");
+    await page.goto("/login", { waitUntil: "networkidle" });
     await page.getByRole("tab", { name: "Email" }).click();
-    await page.getByLabel("Email").fill(email);
-    await page.getByLabel("Password").fill(password);
+    await fillField(page.getByLabel("Email"), email);
+    await fillField(page.getByLabel("Password"), password);
     await page.getByRole("button", { name: "Sign in" }).click();
 
     await expect(page.getByTestId("verify-email-notice")).toBeVisible();
@@ -235,16 +363,20 @@ test.describe("1degree Auth & Mobile-First Shell", () => {
     // 5. Sign in cleanly -> lands in /today shell
     await page.getByRole("link", { name: "Continue to sign in" }).click();
     await page.waitForURL(/\/login/);
+    await page.waitForLoadState("networkidle");
     await page.getByRole("tab", { name: "Email" }).click();
-    await page.getByLabel("Email").fill(email);
-    await page.getByLabel("Password").fill(password);
+    await fillField(page.getByLabel("Email"), email);
+    await fillField(page.getByLabel("Password"), password);
     await page.getByRole("button", { name: "Sign in" }).click();
 
     await page.waitForURL(/\/today/);
     await expect(page.getByTestId("today-greeting")).toContainText("Welcome, QA Runner");
     await expect(page.getByTestId("today-coin-balance")).toHaveText("0");
     await expect(page.getByTestId("topbar-coin-balance")).toHaveText("0");
-    await page.screenshot({ path: "/tmp/pw-shell-390.png", fullPage: true });
+    expect(loginSetCookie).toContain("HttpOnly");
+    expect(loginSetCookie).toContain("SameSite=Lax");
+    expect(loginSetCookie).toContain("Path=/v1/auth");
+    await page.screenshot({ path: `/tmp/pw-shell-${project}-390.png`, fullPage: true });
 
     // Check desktop width centering (~480px)
     await page.setViewportSize({ width: 1280, height: 800 });
@@ -253,15 +385,23 @@ test.describe("1degree Auth & Mobile-First Shell", () => {
       return el.getBoundingClientRect().width;
     });
     expect(navWidth).toBeLessThanOrEqual(482);
-    await page.screenshot({ path: "/tmp/pw-shell-desktop.png", fullPage: true });
+    await page.screenshot({ path: `/tmp/pw-shell-${project}-desktop.png`, fullPage: true });
     await page.setViewportSize({ width: 390, height: 844 });
 
     // 6. Reload stays signed in & no tokens in cookie/storage
     await page.reload();
     await expect(page.getByTestId("today-greeting")).toContainText("Welcome, QA Runner");
+    expect(refreshSetCookie).toContain("HttpOnly");
     await assertNoTokensInWebStorage(page);
 
-    // 7. Navigate Rewards & Progress tabs
+    // 6b. Open a second tab and confirm signed in (wait sequentially so refresh token rotation never races)
+    const page2 = await context.newPage();
+    await page2.goto("/today");
+    await expect(page2.getByTestId("today-greeting")).toContainText("Welcome, QA Runner");
+    await expect(page2.getByTestId("today-coin-balance")).toHaveText("0");
+    await page2.close();
+
+    // 7. Navigate Rewards & Progress tabs (reload first if second tab rotated refresh cookie only in memory)
     await page.getByRole("link", { name: "Rewards" }).click();
     await page.waitForURL(/\/rewards/);
     await expect(page.getByText("No rewards configured yet")).toBeVisible();
@@ -298,9 +438,9 @@ test.describe("1degree Auth & Mobile-First Shell", () => {
     const startIdx = outboxLineCount();
 
     // Register & verify via API setup using UI
-    await page.goto("/register");
-    await page.getByLabel("Email").fill(email);
-    await page.getByLabel("Password (min 8 characters)").fill(password);
+    await page.goto("/register", { waitUntil: "networkidle" });
+    await fillField(page.getByLabel("Email"), email);
+    await fillField(page.getByLabel("Password (min 8 characters)"), password);
     await page.getByRole("button", { name: "Create account" }).click();
     await page.waitForURL(/\/check-email/);
     const { entry: verMail } = await waitForOutboxEntry(email, "verification", startIdx);
@@ -308,30 +448,30 @@ test.describe("1degree Auth & Mobile-First Shell", () => {
     await expect(page.getByTestId("verify-success-heading")).toBeVisible();
 
     // Generic error parity: wrong password vs unknown email
-    await page.goto("/login");
+    await page.goto("/login", { waitUntil: "networkidle" });
     await page.getByRole("tab", { name: "Email" }).click();
-    await page.getByLabel("Email").fill(email);
-    await page.getByLabel("Password").fill("DefinitelyWrong99!");
+    await fillField(page.getByLabel("Email"), email);
+    await fillField(page.getByLabel("Password"), "DefinitelyWrong99!");
     await page.getByRole("button", { name: "Sign in" }).click();
     const wrongPwMsg = await page.getByTestId("login-error").innerText();
 
-    await page.getByLabel("Email").fill(makeSyntheticEmail("missing"));
-    await page.getByLabel("Password").fill("DefinitelyWrong99!");
+    await fillField(page.getByLabel("Email"), makeSyntheticEmail("missing"));
+    await fillField(page.getByLabel("Password"), "DefinitelyWrong99!");
     await page.getByRole("button", { name: "Sign in" }).click();
     const unknownMsg = await page.getByTestId("login-error").innerText();
     expect(wrongPwMsg).toBe(unknownMsg);
     expect(wrongPwMsg).toContain("Invalid email or password");
 
     // Sign in to establish an active session before resetting password
-    await page.getByLabel("Email").fill(email);
-    await page.getByLabel("Password").fill(password);
+    await fillField(page.getByLabel("Email"), email);
+    await fillField(page.getByLabel("Password"), password);
     await page.getByRole("button", { name: "Sign in" }).click();
     await page.waitForURL(/\/today/);
 
     // Request password reset
     const resetIdx = outboxLineCount();
-    await page.goto("/forgot-password");
-    await page.getByLabel("Email").fill(email);
+    await page.goto("/forgot-password", { waitUntil: "networkidle" });
+    await fillField(page.getByLabel("Email"), email);
     await page.getByRole("button", { name: "Send reset link" }).click();
     await expect(page.getByTestId("forgot-confirmation")).toBeVisible();
 
@@ -339,10 +479,10 @@ test.describe("1degree Auth & Mobile-First Shell", () => {
     expect(resetMail.url).toMatch(/^http:\/\/localhost:3000\/reset-password\?token=/);
 
     // Open reset page -> URL immediately stripped of token -> set new password
-    await page.goto(resetMail.url);
+    await page.goto(resetMail.url, { waitUntil: "networkidle" });
     await expect(page).not.toHaveURL(/token=/);
-    await page.getByLabel("New password (min 8 characters)").fill(newPassword);
-    await page.getByLabel("Confirm new password").fill(newPassword);
+    await fillField(page.getByLabel("New password (min 8 characters)"), newPassword);
+    await fillField(page.getByLabel("Confirm new password"), newPassword);
     await page.getByRole("button", { name: "Update password" }).click();
     await expect(page.getByTestId("reset-success")).toBeVisible();
 
@@ -351,26 +491,28 @@ test.describe("1degree Auth & Mobile-First Shell", () => {
     await page.waitForURL(/\/login/);
 
     // Reusing the reset link fails cleanly
-    await page.goto(resetMail.url);
+    await page.goto(resetMail.url, { waitUntil: "networkidle" });
     await expect(page).not.toHaveURL(/token=/);
-    await page.getByLabel("New password (min 8 characters)").fill(newPassword);
-    await page.getByLabel("Confirm new password").fill(newPassword);
+    await fillField(page.getByLabel("New password (min 8 characters)"), newPassword);
+    await fillField(page.getByLabel("Confirm new password"), newPassword);
     await page.getByRole("button", { name: "Update password" }).click();
     await expect(page.getByTestId("reset-error")).toBeVisible();
 
     // Invalid/expired token fails cleanly
-    await page.goto("http://localhost:3000/reset-password?token=expired_or_invalid_token");
+    await page.goto("http://localhost:3000/reset-password?token=expired_or_invalid_token", {
+      waitUntil: "networkidle",
+    });
     await expect(page).not.toHaveURL(/token=/);
-    await page.getByLabel("New password (min 8 characters)").fill(newPassword);
-    await page.getByLabel("Confirm new password").fill(newPassword);
+    await fillField(page.getByLabel("New password (min 8 characters)"), newPassword);
+    await fillField(page.getByLabel("Confirm new password"), newPassword);
     await page.getByRole("button", { name: "Update password" }).click();
     await expect(page.getByTestId("reset-error")).toBeVisible();
 
     // New password logs in cleanly
-    await page.goto("/login");
+    await page.goto("/login", { waitUntil: "networkidle" });
     await page.getByRole("tab", { name: "Email" }).click();
-    await page.getByLabel("Email").fill(email);
-    await page.getByLabel("Password").fill(newPassword);
+    await fillField(page.getByLabel("Email"), email);
+    await fillField(page.getByLabel("Password"), newPassword);
     await page.getByRole("button", { name: "Sign in" }).click();
     await page.waitForURL(/\/today/);
 
