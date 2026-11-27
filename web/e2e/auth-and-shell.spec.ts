@@ -222,13 +222,15 @@ test.describe("1degree Auth & Mobile-First Shell", () => {
     await page.getByRole("button", { name: "Sign in" }).click();
 
     await expect(page.getByTestId("verify-email-notice")).toBeVisible();
-    await expect(page.getByText("Verify your email")).toBeVisible();
+    await expect(
+      page.getByTestId("verify-email-notice").getByText("Verify your email", { exact: true })
+    ).toBeVisible();
     await expect(page.getByRole("button", { name: "Resend verification" })).toBeVisible();
 
     // 4. Open verification URL -> token removed from address bar -> verified state
     await page.goto(verMail.url);
+    await expect(page).not.toHaveURL(/token=/);
     await expect(page.getByTestId("verify-success-heading")).toBeVisible();
-    expect(page.url()).not.toContain("token=");
 
     // 5. Sign in cleanly -> lands in /today shell
     await page.getByRole("link", { name: "Continue to sign in" }).click();
@@ -338,7 +340,7 @@ test.describe("1degree Auth & Mobile-First Shell", () => {
 
     // Open reset page -> URL immediately stripped of token -> set new password
     await page.goto(resetMail.url);
-    expect(page.url()).not.toContain("token=");
+    await expect(page).not.toHaveURL(/token=/);
     await page.getByLabel("New password (min 8 characters)").fill(newPassword);
     await page.getByLabel("Confirm new password").fill(newPassword);
     await page.getByRole("button", { name: "Update password" }).click();
@@ -350,15 +352,15 @@ test.describe("1degree Auth & Mobile-First Shell", () => {
 
     // Reusing the reset link fails cleanly
     await page.goto(resetMail.url);
-    await page.getByLabel("New password (min 8 characters)").fill(makeRandomPassword());
+    await expect(page).not.toHaveURL(/token=/);
+    await page.getByLabel("New password (min 8 characters)").fill(newPassword);
     await page.getByLabel("Confirm new password").fill(newPassword);
-    await page.getByLabel("Confirm new password").fill(await page.getByLabel("New password (min 8 characters)").inputValue());
     await page.getByRole("button", { name: "Update password" }).click();
     await expect(page.getByTestId("reset-error")).toBeVisible();
 
     // Invalid/expired token fails cleanly
     await page.goto("http://localhost:3000/reset-password?token=expired_or_invalid_token");
-    expect(page.url()).not.toContain("token=");
+    await expect(page).not.toHaveURL(/token=/);
     await page.getByLabel("New password (min 8 characters)").fill(newPassword);
     await page.getByLabel("Confirm new password").fill(newPassword);
     await page.getByRole("button", { name: "Update password" }).click();
