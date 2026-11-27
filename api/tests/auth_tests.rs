@@ -1654,3 +1654,574 @@ async fn test_google_jwks_override_validates_aud_iss_exp_and_creates_verified_us
     let _ = Extension::<Value>;
     jwks_server.abort();
 }
+
+#[tokio::test]
+async fn test_email_variants_normalization_and_validation_rejects_malformed_and_crlf() {
+    let (app, state) = setup_test_app().await;
+    let password = "ValidPassword123!";
+
+    // 1. Valid variants stored trimmed + lowercase
+    let id = Uuid::new_v4();
+    let accepted = vec![
+        (
+            format!("  UPPER_{}@EXAMPLE.TEST  ", id),
+            format!("upper_{}@example.test", id),
+        ),
+        (
+            format!("plus+tag_{}@example.test", id),
+            format!("plus+tag_{}@example.test", id),
+        ),
+        (
+            format!("idn_{}@xn--bcher-kva.example", id),
+            format!("idn_{}@xn--bcher-kva.example", id),
+        ),
+    ];
+
+    for (raw_email, expected_email) in accepted {
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/auth/register")
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&json!({
+                    "email": raw_email,
+                    "password": password,
+                    "full_name": "  Trimmed User  "
+                }))
+                .unwrap(),
+            ))
+            .unwrap();
+        let res = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::CREATED, "email {}", raw_email);
+
+        let stored_email: Option<String> = sqlx::query_scalar!(
+            "SELECT email FROM users WHERE LOWER(email) = $1",
+            expected_email
+        )
+        .fetch_one(&state.pool)
+        .await
+        .unwrap();
+        assert_eq!(stored_email.as_deref(), Some(expected_email.as_str()));
+    }
+
+    // 2. Rejected variants: >254 chars, no dot, two @, raw unicode, emoji, CRLF (never 500)
+    let too_long_email = format!("{}@example.test", "a".repeat(245));
+    assert!(too_long_email.len() > 254);
+    let rejected = vec![
+        too_long_email,
+        "nodot@localhost".to_string(),
+        "two@@example.test".to_string(),
+        "ünïcödé@example.test".to_string(),
+        "😀@example.test".to_string(),
+        "crlf@example.test\r\nBcc: evil@example.test".to_string(),
+    ];
+
+    let mut app_batch = setup_test_app().await.0;
+    for (idx, bad_email) in rejected.into_iter().enumerate() {
+        if idx > 0 && idx % 4 == 0 {
+            app_batch = setup_test_app().await.0;
+        }
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/auth/register")
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&json!({ "email": bad_email, "password": password })).unwrap(),
+            ))
+            .unwrap();
+        let res = app_batch.clone().oneshot(req).await.unwrap();
+        assert_eq!(
+            res.status(),
+            StatusCode::BAD_REQUEST,
+            "bad email {:?} must return 400 not 500",
+            bad_email
+        );
+    }
+
+    // 3. Name length > 100 and CRLF rejected cleanly
+    let (app_names, _) = setup_test_app().await;
+    let long_name_req = Request::builder()
+        .method("POST")
+        .uri("/v1/auth/register")
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            serde_json::to_vec(&json!({
+                "email": format!("longname_{}@example.test", id),
+                "password": password,
+                "full_name": "x".repeat(101)
+            }))
+            .unwrap(),
+        ))
+        .unwrap();
+    assert_eq!(
+        app_names
+            .clone()
+            .oneshot(long_name_req)
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
+
+    let crlf_name_req = Request::builder()
+        .method("POST")
+        .uri("/v1/auth/register")
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            serde_json::to_vec(&json!({
+                "email": format!("crlfname_{}@example.test", id),
+                "password": password,
+                "full_name": "Bob\r\nBcc: evil@example.test"
+            }))
+            .unwrap(),
+        ))
+        .unwrap();
+    assert_eq!(
+        app_names.oneshot(crlf_name_req).await.unwrap().status(),
+        StatusCode::BAD_REQUEST
+    );
+}
+
+#[tokio::test]
+async fn test_password_bounds_and_1mb_rejected_quickly_before_argon2() {
+    let (app, state) = setup_test_app().await;
+    let id = Uuid::new_v4();
+
+    // 7 chars rejected
+    let short_req = Request::builder()
+        .method("POST")
+        .uri("/v1/auth/register")
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            serde_json::to_vec(&json!({
+                "email": format!("pw7_{}@example.test", id),
+                "password": "1234567"
+            }))
+            .unwrap(),
+        ))
+        .unwrap();
+    assert_eq!(
+        app.clone().oneshot(short_req).await.unwrap().status(),
+        StatusCode::BAD_REQUEST
+    );
+
+    // 128 chars accepted
+    let pw128 = "A".repeat(128);
+    let ok128_req = Request::builder()
+        .method("POST")
+        .uri("/v1/auth/register")
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            serde_json::to_vec(&json!({
+                "email": format!("pw128_{}@example.test", id),
+                "password": pw128
+            }))
+            .unwrap(),
+        ))
+        .unwrap();
+    assert_eq!(
+        app.clone().oneshot(ok128_req).await.unwrap().status(),
+        StatusCode::CREATED
+    );
+
+    // 129 chars rejected
+    let pw129_req = Request::builder()
+        .method("POST")
+        .uri("/v1/auth/register")
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            serde_json::to_vec(&json!({
+                "email": format!("pw129_{}@example.test", id),
+                "password": "A".repeat(129)
+            }))
+            .unwrap(),
+        ))
+        .unwrap();
+    assert_eq!(
+        app.clone().oneshot(pw129_req).await.unwrap().status(),
+        StatusCode::BAD_REQUEST
+    );
+
+    // 1 MB password rejected quickly (<150ms, proves Argon2 skipped)
+    let big_pw = "a".repeat(1024 * 1024);
+    let start = std::time::Instant::now();
+    let big_reg = Request::builder()
+        .method("POST")
+        .uri("/v1/auth/register")
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            serde_json::to_vec(&json!({
+                "email": format!("pw1mb_{}@example.test", id),
+                "password": big_pw
+            }))
+            .unwrap(),
+        ))
+        .unwrap();
+    let big_res = app.clone().oneshot(big_reg).await.unwrap();
+    let elapsed = start.elapsed();
+    assert_eq!(big_res.status(), StatusCode::BAD_REQUEST);
+    assert!(
+        elapsed.as_millis() < 150,
+        "1 MB password rejection took {:?}, expected fast pre-Argon2 rejection",
+        elapsed
+    );
+
+    // Unicode + spaces password works cleanly
+    let unicode_email = format!("pwuni_{}@example.test", id);
+    let unicode_pw = "päss wörd 🔐 123";
+    let uni_reg = Request::builder()
+        .method("POST")
+        .uri("/v1/auth/register")
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            serde_json::to_vec(&json!({
+                "email": unicode_email,
+                "password": unicode_pw
+            }))
+            .unwrap(),
+        ))
+        .unwrap();
+    assert_eq!(
+        app.clone().oneshot(uni_reg).await.unwrap().status(),
+        StatusCode::CREATED
+    );
+    sqlx::query!(
+        "UPDATE users SET email_verified_at = now() WHERE LOWER(email) = $1",
+        unicode_email.to_lowercase()
+    )
+    .execute(&state.pool)
+    .await
+    .unwrap();
+
+    let uni_login = Request::builder()
+        .method("POST")
+        .uri("/v1/auth/login")
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            serde_json::to_vec(&json!({ "email": unicode_email, "password": unicode_pw })).unwrap(),
+        ))
+        .unwrap();
+    assert_eq!(
+        app.oneshot(uni_login).await.unwrap().status(),
+        StatusCode::OK
+    );
+}
+
+#[tokio::test]
+async fn test_verification_token_isolation_tampered_and_expired() {
+    let mailer = Arc::new(RecordingMailer::default());
+    let (app, state) = setup_test_app_with_mailer(mailer.clone()).await;
+    let pw = "ValidPassword123!";
+    let email_a = format!("usera_{}@example.test", Uuid::new_v4());
+    let email_b = format!("userb_{}@example.test", Uuid::new_v4());
+
+    for em in [&email_a, &email_b] {
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/auth/register")
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&json!({ "email": em, "password": pw })).unwrap(),
+            ))
+            .unwrap();
+        assert_eq!(
+            app.clone().oneshot(req).await.unwrap().status(),
+            StatusCode::CREATED
+        );
+    }
+
+    let tokens = mailer.sent_verification.lock().await;
+    let tok_a = tokens[0].1.clone();
+    let tok_b = tokens[1].1.clone();
+    drop(tokens);
+
+    // Tampered / truncated token fails
+    let tampered = &tok_a[..tok_a.len() - 3];
+    let res_tampered = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/auth/verify-email")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&json!({ "token": tampered })).unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res_tampered.status(), StatusCode::BAD_REQUEST);
+
+    // Submitting User B's token verifies User B only; User A remains unverified (403)
+    let res_b = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/auth/verify-email")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&json!({ "token": tok_b })).unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res_b.status(), StatusCode::OK);
+
+    let login_a = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/auth/login")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&json!({ "email": email_a, "password": pw })).unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(login_a.status(), StatusCode::FORBIDDEN);
+
+    // Expire User A's token in DB -> fails cleanly with 400
+    let hash_a = jwt::hash_refresh_token(&tok_a);
+    sqlx::query!(
+        "UPDATE email_verification_tokens SET expires_at = now() - interval '1 hour' WHERE token_hash = $1",
+        hash_a
+    )
+    .execute(&state.pool)
+    .await
+    .unwrap();
+
+    let res_exp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/auth/verify-email")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&json!({ "token": tok_a })).unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res_exp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_spoofed_xff_cannot_bypass_rate_limit_and_resend_timing_parity() {
+    use std::net::SocketAddr;
+
+    // 1. Verify X-Forwarded-For spoofing cannot bypass per-IP resend limit over real TCP ConnectInfo
+    let (app, state) = setup_test_app().await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+
+    let client = reqwest::Client::new();
+    let url = format!("http://{}/v1/auth/resend-verification", addr);
+    for i in 0..10 {
+        let res = client
+            .post(&url)
+            .header("x-forwarded-for", format!("198.51.100.{}", i + 1))
+            .json(&json!({ "email": format!("unknown_{}@example.test", i) }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), reqwest::StatusCode::OK);
+    }
+
+    let blocked = client
+        .post(&url)
+        .header("x-forwarded-for", "203.0.113.99")
+        .json(&json!({ "email": "unknown_11@example.test" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        blocked.status(),
+        reqwest::StatusCode::TOO_MANY_REQUESTS,
+        "Spoofed X-Forwarded-For must NOT bypass per-IP rate limit"
+    );
+    server.abort();
+
+    // 2. Compare 20 known vs 20 unknown resend requests average latency (<15ms difference)
+    let known_email = format!("known_timing_{}@example.test", Uuid::new_v4());
+    sqlx::query!(
+        "INSERT INTO users (email, password_hash, email_verified_at) VALUES ($1, 'dummyhash', now())",
+        known_email
+    )
+    .execute(&state.pool)
+    .await
+    .unwrap();
+
+    let mut known_total = std::time::Duration::ZERO;
+    let mut unknown_total = std::time::Duration::ZERO;
+    for batch in 0..4 {
+        let (app_b, _) = setup_test_app().await;
+        for j in 0..5 {
+            let t0 = std::time::Instant::now();
+            let r_k = app_b
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/v1/auth/resend-verification")
+                        .header(CONTENT_TYPE, "application/json")
+                        .body(Body::from(
+                            serde_json::to_vec(&json!({ "email": known_email })).unwrap(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            known_total += t0.elapsed();
+            assert_eq!(r_k.status(), StatusCode::OK);
+
+            let t1 = std::time::Instant::now();
+            let r_u = app_b
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/v1/auth/resend-verification")
+                        .header(CONTENT_TYPE, "application/json")
+                        .body(Body::from(
+                            serde_json::to_vec(
+                                &json!({ "email": format!("unknown_{}_{}@example.test", batch, j) }),
+                            )
+                            .unwrap(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            unknown_total += t1.elapsed();
+            assert_eq!(r_u.status(), StatusCode::OK);
+        }
+    }
+    let avg_known_ms = known_total.as_secs_f64() * 1000.0 / 20.0;
+    let avg_unknown_ms = unknown_total.as_secs_f64() * 1000.0 / 20.0;
+    assert!(
+        (avg_known_ms - avg_unknown_ms).abs() < 15.0,
+        "timing delta too large: known={:.2}ms unknown={:.2}ms",
+        avg_known_ms,
+        avg_unknown_ms
+    );
+}
+
+#[tokio::test]
+async fn test_mailer_500_allows_user_creation_and_recovery_plus_sql_chars_in_name() {
+    use async_trait::async_trait;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct ToggleMailer {
+        fail: AtomicBool,
+        tokens: Mutex<Vec<String>>,
+    }
+
+    #[async_trait]
+    impl Mailer for ToggleMailer {
+        async fn send_verification_email(&self, _to: &str, token: &str) -> Result<(), String> {
+            if self.fail.load(Ordering::SeqCst) {
+                return Err(
+                    "Resend failed (status=500, name=application_error, message=upstream error)"
+                        .to_string(),
+                );
+            }
+            self.tokens.lock().await.push(token.to_string());
+            Ok(())
+        }
+        async fn send_password_reset_email(&self, _to: &str, _token: &str) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    let mailer = Arc::new(ToggleMailer {
+        fail: AtomicBool::new(true),
+        tokens: Mutex::new(Vec::new()),
+    });
+    let (app, state) = setup_test_app_with_mailer(mailer.clone()).await;
+
+    let email = format!("mailfail_{}@example.test", Uuid::new_v4());
+    let sql_name = "O'Reilly'; DROP TABLE users;--";
+    let pw = "ValidPassword123!";
+
+    // Register during mailer 500 still returns 201 and creates user safely
+    let reg = Request::builder()
+        .method("POST")
+        .uri("/v1/auth/register")
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            serde_json::to_vec(&json!({
+                "email": email,
+                "password": pw,
+                "full_name": sql_name
+            }))
+            .unwrap(),
+        ))
+        .unwrap();
+    assert_eq!(
+        app.clone().oneshot(reg).await.unwrap().status(),
+        StatusCode::CREATED
+    );
+
+    let stored_name: Option<String> = sqlx::query_scalar!(
+        "SELECT full_name FROM users WHERE LOWER(email) = $1",
+        email.to_lowercase()
+    )
+    .fetch_one(&state.pool)
+    .await
+    .unwrap();
+    assert_eq!(stored_name.as_deref(), Some(sql_name));
+
+    // Recover once mailer works again after cooldown elapses
+    sqlx::query!(
+        r#"
+        UPDATE email_verification_tokens evt
+        SET created_at = now() - interval '65 seconds'
+        FROM users u
+        WHERE evt.user_id = u.id AND LOWER(u.email) = $1
+        "#,
+        email.to_lowercase()
+    )
+    .execute(&state.pool)
+    .await
+    .unwrap();
+
+    mailer.fail.store(false, Ordering::SeqCst);
+    let resend = Request::builder()
+        .method("POST")
+        .uri("/v1/auth/resend-verification")
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            serde_json::to_vec(&json!({ "email": email })).unwrap(),
+        ))
+        .unwrap();
+    assert_eq!(
+        app.clone().oneshot(resend).await.unwrap().status(),
+        StatusCode::OK
+    );
+    let recovered_tok = mailer.tokens.lock().await[0].clone();
+
+    let verify = Request::builder()
+        .method("POST")
+        .uri("/v1/auth/verify-email")
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            serde_json::to_vec(&json!({ "token": recovered_tok })).unwrap(),
+        ))
+        .unwrap();
+    assert_eq!(app.oneshot(verify).await.unwrap().status(), StatusCode::OK);
+}

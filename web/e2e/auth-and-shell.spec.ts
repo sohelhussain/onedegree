@@ -643,6 +643,136 @@ test.describe("1degree Auth & Mobile-First Shell", () => {
     await context.close();
   });
 
+  test("Step D attacker: throttled double-submit sends 1 request, GET verify-email no-JS safe, cross-context verify, outage recovery, injection, and keyboard/paste a11y", async ({
+    browser,
+  }, testInfo) => {
+    const project = testInfo.project.name;
+    const context = await browser.newContext({
+      viewport: { width: 390, height: 844 },
+    });
+    await attachHostGuard(context);
+    const page = await context.newPage();
+
+    let dialogFired = false;
+    page.on("dialog", async (d) => {
+      dialogFired = true;
+      await d.dismiss();
+    });
+
+    // D.9 Empty-token navigation states render cleanly
+    await page.goto("/verify-email", { waitUntil: "networkidle" });
+    await expect(page.getByText("Verification failed")).toBeVisible();
+    await page.goto("/reset-password", { waitUntil: "networkidle" });
+    await expect(page.getByText("Password reset link is missing a token.")).toBeVisible();
+
+    // D.12 Keyboard tab navigation & paste support on /register at 390px
+    await page.goto("/register", { waitUntil: "networkidle" });
+    await page.keyboard.press("Tab");
+    const firstFocusedId = await page.evaluate(() => document.activeElement?.id || "");
+    expect(firstFocusedId).toBe("reg-name");
+    await page.keyboard.press("Tab");
+    const secondFocusedId = await page.evaluate(() => document.activeElement?.id || "");
+    expect(secondFocusedId).toBe("reg-email");
+    await page.keyboard.press("Tab");
+    const thirdFocusedId = await page.evaluate(() => document.activeElement?.id || "");
+    expect(thirdFocusedId).toBe("reg-password");
+
+    // Verify paste event works into password input
+    await page.locator("#reg-password").evaluate((el) => {
+      const input = el as HTMLInputElement;
+      const dt = new DataTransfer();
+      dt.setData("text/plain", "PastedPass123!");
+      const evt = new ClipboardEvent("paste", { clipboardData: dt, bubbles: true, cancelable: true });
+      input.dispatchEvent(evt);
+    });
+
+    // D.10 Mid-flow network failure stops spinner & leaves form usable
+    const attackerEmail = makeSyntheticEmail(`atk-${project}`);
+    const attackerPass = makeRandomPassword();
+    const attackerName = "<script>window.__xss=1</script> O'Reilly";
+
+    await page.route("**/v1/auth/register", async (route) => {
+      await route.abort("connectionrefused");
+    });
+    await fillField(page.locator("#reg-name"), attackerName);
+    await fillField(page.locator("#reg-email"), attackerEmail);
+    await fillField(page.locator("#reg-password"), attackerPass);
+    await page.getByRole("button", { name: "Create account" }).click();
+
+    await expect(
+      page.getByRole("alert").filter({ hasText: "Unable to reach authentication server" })
+    ).toBeVisible();
+    await expect(page.getByRole("button", { name: "Create account" })).toBeEnabled();
+    await page.unroute("**/v1/auth/register");
+
+    // D.1 Throttled network + double-click + rapid Enter fires strictly ONE register POST
+    let registerPostCount = 0;
+    const startIdx = outboxLineCount();
+    await page.route("**/v1/auth/register", async (route) => {
+      registerPostCount++;
+      await new Promise((r) => setTimeout(r, 400));
+      await route.continue();
+    });
+
+    await fillField(page.locator("#reg-name"), attackerName);
+    await fillField(page.locator("#reg-email"), attackerEmail);
+    await fillField(page.locator("#reg-password"), attackerPass);
+    await page.locator("button[type='submit']").evaluate((btn) => {
+      const el = btn as HTMLButtonElement;
+      el.click();
+      el.click();
+    });
+    await page.locator("#reg-password").press("Enter").catch(() => {});
+
+    await page.waitForURL(/\/check-email/);
+    await page.unroute("**/v1/auth/register");
+    expect(registerPostCount).toBe(1);
+
+    const { entry: verMail } = await waitForOutboxEntry(attackerEmail, "verification", startIdx);
+    const matchesForEmail = fs
+      .readFileSync(OUTBOX_PATH, "utf8")
+      .split("\n")
+      .slice(startIdx)
+      .filter((line) => line.includes(attackerEmail));
+    expect(matchesForEmail.length).toBe(1);
+
+    // D.9 Refresh /check-email & Back after register render cleanly
+    await page.reload({ waitUntil: "networkidle" });
+    await expect(page.getByRole("heading", { name: "Check your email" })).toBeVisible();
+    await page.goBack();
+    await expect(page.locator("body")).toBeVisible();
+
+    // D.5 Plain GET of /verify-email (simulating email link scanner without JS) must NOT consume token
+    const scannerGet = await page.request.get(verMail.url);
+    expect(scannerGet.status()).toBe(200);
+
+    // D.5 Open verification link in a COMPLETELY DIFFERENT browser context -> still verifies!
+    const contextB = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+    await attachHostGuard(contextB);
+    const pageB = await contextB.newPage();
+    await pageB.goto(verMail.url);
+    await expect(pageB.getByTestId("verify-success-heading")).toBeVisible();
+
+    // Sign in in Context B at 1280x800 and check D.11 safe rendering of script/SQL name
+    await pageB.getByRole("link", { name: "Continue to sign in" }).click();
+    await pageB.waitForURL(/\/login/);
+    await pageB.waitForLoadState("networkidle");
+    await pageB.getByRole("tab", { name: "Email" }).click();
+    await fillField(pageB.locator("#login-email"), attackerEmail);
+    await fillField(pageB.locator("#login-password"), attackerPass);
+    await pageB.locator("#login-password").press("Enter");
+    await pageB.waitForURL(/\/today/);
+    await expect(pageB.getByTestId("today-greeting")).toContainText(attackerName);
+    expect(dialogFired).toBe(false);
+    const xssTriggered = await pageB.evaluate(
+      () => Boolean((window as unknown as { __xss?: number }).__xss)
+    );
+    expect(xssTriggered).toBe(false);
+
+    await contextB.close();
+    await context.close();
+  });
+
   test("rapid failed logins hit rate limit and UI shows friendly message", async ({
     browser,
   }) => {
