@@ -9,7 +9,7 @@ A plane that tilts just 1 degree ends up hundreds of miles from its original cou
 ```
 onedegree/
 ├── api/                  # High-performance Rust backend (Axum, sqlx, PostgreSQL 16)
-├── web/                  # Modern web client (Next.js 15, React 19, Tailwind CSS, shadcn/ui)
+├── web/                  # Modern web client (Next.js 16, React 19, Tailwind CSS, shadcn/ui)
 ├── docs/                 # Architecture, schemas, and implementation plan documentation
 ├── Makefile              # Unified development automation commands
 └── docker-compose.yml     # Local services container orchestration (PostgreSQL 16)
@@ -46,7 +46,7 @@ onedegree/
    ```
    API runs on `http://localhost:8080` (API base: `http://localhost:8080/v1`).
 
-4. **Run the Web application (Next.js 15)**:
+4. **Run the Web application (Next.js 16)**:
    ```sh
    make dev-web
    ```

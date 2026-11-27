@@ -1,15 +1,15 @@
-use std::sync::Arc;
 use axum::{
     extract::FromRequestParts,
     http::{header::AUTHORIZATION, request::Parts},
 };
+use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::{
+    AppState,
     auth::jwt,
     errors::ApiError,
     models::{User, UserRole},
-    AppState,
 };
 
 #[derive(Debug, Clone)]
@@ -35,11 +35,11 @@ where
             .and_then(|h| h.to_str().ok())
             .ok_or_else(|| ApiError::Unauthorized("Missing Authorization header".into()))?;
 
-        let token = auth_header
-            .strip_prefix("Bearer ")
-            .ok_or_else(|| {
-                ApiError::Unauthorized("Invalid Authorization header format; expected Bearer token".into())
-            })?;
+        let token = auth_header.strip_prefix("Bearer ").ok_or_else(|| {
+            ApiError::Unauthorized(
+                "Invalid Authorization header format; expected Bearer token".into(),
+            )
+        })?;
 
         let user_id = jwt::verify_access_token(token, app_state.config.jwt_secret.as_bytes())?;
 

@@ -2,7 +2,7 @@
 
 import React, { createContext, useContext, useEffect, useState } from "react";
 import { User, AuthResponse } from "./types";
-import { apiClient, setAccessToken } from "./api";
+import { apiClient, setAccessToken, refreshAccessToken, ApiError } from "./api";
 import { toast } from "sonner";
 
 interface AuthContextType {
@@ -24,23 +24,36 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const refreshSession = async (): Promise<boolean> => {
     try {
-      // 1. Attempt token refresh using httpOnly cookie
-      const refreshRes = await apiClient<{ access_token: string; expires_in: number }>(
-        "/auth/refresh",
-        { method: "POST" }
-      );
+      // 1. Single-flight token refresh using httpOnly cookie
+      const token = await refreshAccessToken();
+      if (!token) {
+        setAccessToken(null);
+        setToken(null);
+        setUser(null);
+        return false;
+      }
 
-      setAccessToken(refreshRes.access_token);
-      setToken(refreshRes.access_token);
+      setAccessToken(token);
+      setToken(token);
 
       // 2. Fetch authenticated profile
       const me = await apiClient<User>("/me");
       setUser(me);
       return true;
-    } catch {
+    } catch (err: unknown) {
       setAccessToken(null);
       setToken(null);
       setUser(null);
+
+      // Quiet signed-out state on 401: no cookie or expired session is normal on load
+      if (err instanceof ApiError && err.status === 401) {
+        return false;
+      }
+
+      // Network or CORS failure: display one friendly message with fixed toast id
+      toast.error("Unable to reach authentication server. Please check your connection.", {
+        id: "auth-network-error",
+      });
       return false;
     } finally {
       setIsLoading(false);
@@ -48,6 +61,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   };
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     refreshSession();
   }, []);
 

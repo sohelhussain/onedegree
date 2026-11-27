@@ -1,26 +1,26 @@
-use std::sync::Arc;
 use axum::{
+    Router,
     body::Body,
     http::{
-        header::{AUTHORIZATION, CONTENT_TYPE, COOKIE, SET_COOKIE},
         Request, StatusCode,
+        header::{AUTHORIZATION, CONTENT_TYPE, COOKIE, ORIGIN, SET_COOKIE},
     },
-    Router,
 };
 use chrono::{Duration, Utc};
 use http_body_util::BodyExt;
 use serde_json::Value;
+use std::sync::Arc;
 use tower::ServiceExt;
 use uuid::Uuid;
 
 use api::{
+    AppState, GoogleVerifier,
     auth::jwt,
     config::Config,
     create_router,
     mailer::ConsoleMailer,
-    models::{has_premium, User, UserRole},
+    models::{User, UserRole, has_premium},
     rate_limiter::RateLimiter,
-    AppState, GoogleVerifier,
 };
 
 async fn setup_test_app() -> (Router, Arc<AppState>) {
@@ -206,10 +206,12 @@ async fn test_replayed_refresh_token_revokes_all_sessions() {
 
     let body_bytes = replay_res.into_body().collect().await.unwrap().to_bytes();
     let json_body: Value = serde_json::from_slice(&body_bytes).unwrap();
-    assert!(json_body["error"]["message"]
-        .as_str()
-        .unwrap()
-        .contains("revoked or replayed"));
+    assert!(
+        json_body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("revoked or replayed")
+    );
 
     // Verify all tokens revoked
     let hash_2 = jwt::hash_refresh_token(&raw_token_2);
@@ -351,8 +353,15 @@ async fn test_unverified_email_cannot_become_admin() {
     .await
     .unwrap();
 
-    assert_eq!(user.role, UserRole::User, "Unverified user MUST NOT have admin role");
-    assert!(user.email_verified_at.is_none(), "Email must be unverified initially");
+    assert_eq!(
+        user.role,
+        UserRole::User,
+        "Unverified user MUST NOT have admin role"
+    );
+    assert!(
+        user.email_verified_at.is_none(),
+        "Email must be unverified initially"
+    );
 
     // 3. Test RequireAdmin extractor rejection:
     let token_rec = sqlx::query!(
@@ -406,7 +415,11 @@ async fn test_unverified_email_cannot_become_admin() {
     .await
     .unwrap();
 
-    assert_eq!(verified_user.role, UserRole::Admin, "Verified admin email MUST become admin");
+    assert_eq!(
+        verified_user.role,
+        UserRole::Admin,
+        "Verified admin email MUST become admin"
+    );
     assert!(verified_user.email_verified_at.is_some());
 }
 
@@ -430,14 +443,20 @@ async fn test_admin_has_premium() {
         created_at: Utc::now(),
         updated_at: Utc::now(),
     };
-    assert!(has_premium(&admin_user), "Admin MUST automatically have has_premium == true");
+    assert!(
+        has_premium(&admin_user),
+        "Admin MUST automatically have has_premium == true"
+    );
 
     let normal_user = User {
         role: UserRole::User,
         is_premium: false,
         ..admin_user.clone()
     };
-    assert!(!has_premium(&normal_user), "Non-premium normal user must have has_premium == false");
+    assert!(
+        !has_premium(&normal_user),
+        "Non-premium normal user must have has_premium == false"
+    );
 
     let premium_normal_user = User {
         role: UserRole::User,
@@ -445,7 +464,10 @@ async fn test_admin_has_premium() {
         premium_until: Some(Utc::now() + Duration::days(10)),
         ..admin_user.clone()
     };
-    assert!(has_premium(&premium_normal_user), "Active premium user must have has_premium == true");
+    assert!(
+        has_premium(&premium_normal_user),
+        "Active premium user must have has_premium == true"
+    );
 
     let expired_premium_user = User {
         role: UserRole::User,
@@ -453,7 +475,10 @@ async fn test_admin_has_premium() {
         premium_until: Some(Utc::now() - Duration::days(1)),
         ..admin_user.clone()
     };
-    assert!(!has_premium(&expired_premium_user), "Expired premium user must have has_premium == false");
+    assert!(
+        !has_premium(&expired_premium_user),
+        "Expired premium user must have has_premium == false"
+    );
 
     // 2. Test via GET /v1/me
     let db_admin = sqlx::query_as!(
@@ -471,12 +496,8 @@ async fn test_admin_has_premium() {
     .await
     .unwrap();
 
-    let access_token = jwt::create_access_token(
-        db_admin.id,
-        state.config.jwt_secret.as_bytes(),
-        900,
-    )
-    .unwrap();
+    let access_token =
+        jwt::create_access_token(db_admin.id, state.config.jwt_secret.as_bytes(), 900).unwrap();
 
     let me_req = Request::builder()
         .method("GET")
@@ -587,10 +608,12 @@ async fn test_duplicate_email_rejected() {
     assert_eq!(res4.status(), StatusCode::BAD_REQUEST);
     let body4 = res4.into_body().collect().await.unwrap().to_bytes();
     let json4: Value = serde_json::from_slice(&body4).unwrap();
-    assert!(json4["error"]["message"]
-        .as_str()
-        .unwrap()
-        .contains("sign in with Google"));
+    assert!(
+        json4["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("sign in with Google")
+    );
 }
 
 #[tokio::test]
@@ -614,7 +637,10 @@ async fn test_duration_check() {
     )
     .execute(&state.pool)
     .await;
-    assert!(bad_action_0.is_err(), "duration_minutes = 0 must violate check constraint");
+    assert!(
+        bad_action_0.is_err(),
+        "duration_minutes = 0 must violate check constraint"
+    );
 
     // 2. duration_minutes = 601 violates CHECK
     let bad_action_601 = sqlx::query!(
@@ -624,7 +650,10 @@ async fn test_duration_check() {
     )
     .execute(&state.pool)
     .await;
-    assert!(bad_action_601.is_err(), "duration_minutes = 601 must violate check constraint");
+    assert!(
+        bad_action_601.is_err(),
+        "duration_minutes = 601 must violate check constraint"
+    );
 
     // 3. Valid duration_minutes = 30 succeeds
     let good_action = sqlx::query!(
@@ -645,7 +674,10 @@ async fn test_duration_check() {
     )
     .execute(&state.pool)
     .await;
-    assert!(bad_todo.is_err(), "todo duration_minutes = -1 must fail check constraint");
+    assert!(
+        bad_todo.is_err(),
+        "todo duration_minutes = -1 must fail check constraint"
+    );
 
     let good_todo = sqlx::query!(
         "INSERT INTO todos (user_id, title, target_date, duration_minutes) VALUES ($1, 'Read', $2, 45) RETURNING id",
@@ -657,12 +689,8 @@ async fn test_duration_check() {
     assert!(good_todo.is_ok(), "todo duration_minutes = 45 must succeed");
 
     // 5. Test GET /v1/home calculates planned minutes (30 + 45 = 75)
-    let access_token = jwt::create_access_token(
-        user.id,
-        state.config.jwt_secret.as_bytes(),
-        900,
-    )
-    .unwrap();
+    let access_token =
+        jwt::create_access_token(user.id, state.config.jwt_secret.as_bytes(), 900).unwrap();
 
     let home_req = Request::builder()
         .method("GET")
@@ -678,4 +706,263 @@ async fn test_duration_check() {
 
     assert_eq!(home_json["planned_minutes"].as_i64().unwrap(), 75);
     assert_eq!(home_json["completed_minutes"].as_i64().unwrap(), 0);
+}
+
+#[tokio::test]
+async fn test_cors_allowed_origin_and_preflight() {
+    let (app, _) = setup_test_app().await;
+
+    // 1. Preflight OPTIONS request
+    let preflight_req = Request::builder()
+        .method("OPTIONS")
+        .uri("/v1/auth/refresh")
+        .header(ORIGIN, "http://localhost:3000")
+        .header("Access-Control-Request-Method", "POST")
+        .header("Access-Control-Request-Headers", "content-type")
+        .body(Body::empty())
+        .unwrap();
+
+    let preflight_res = app.clone().oneshot(preflight_req).await.unwrap();
+    assert!(
+        preflight_res.status().is_success(),
+        "preflight OPTIONS should succeed, got {}",
+        preflight_res.status()
+    );
+
+    let headers = preflight_res.headers();
+    assert_eq!(
+        headers.get("access-control-allow-origin").unwrap(),
+        "http://localhost:3000"
+    );
+    assert_eq!(
+        headers.get("access-control-allow-credentials").unwrap(),
+        "true"
+    );
+    assert!(headers.contains_key("access-control-allow-methods"));
+    assert!(headers.contains_key("access-control-allow-headers"));
+    assert!(headers.contains_key("access-control-max-age"));
+    let allow_origin = headers
+        .get("access-control-allow-origin")
+        .unwrap()
+        .to_str()
+        .unwrap();
+    assert_ne!(
+        allow_origin, "*",
+        "wildcard must never be used in access-control-allow-origin"
+    );
+
+    // 2. Simple GET request with allowed origin
+    let get_req = Request::builder()
+        .method("GET")
+        .uri("/health")
+        .header(ORIGIN, "http://localhost:3000")
+        .body(Body::empty())
+        .unwrap();
+
+    let get_res = app.clone().oneshot(get_req).await.unwrap();
+    assert_eq!(get_res.status(), StatusCode::OK);
+    let get_headers = get_res.headers();
+    assert_eq!(
+        get_headers.get("access-control-allow-origin").unwrap(),
+        "http://localhost:3000"
+    );
+    assert_eq!(
+        get_headers.get("access-control-allow-credentials").unwrap(),
+        "true"
+    );
+    assert!(
+        get_headers
+            .get("vary")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_lowercase()
+            .contains("origin")
+    );
+}
+
+#[tokio::test]
+async fn test_cors_evil_origin_gets_no_cors_headers() {
+    let (app, _) = setup_test_app().await;
+
+    let evil_req = Request::builder()
+        .method("GET")
+        .uri("/health")
+        .header(ORIGIN, "https://evil.example")
+        .body(Body::empty())
+        .unwrap();
+
+    let evil_res = app.oneshot(evil_req).await.unwrap();
+    let headers = evil_res.headers();
+    assert!(
+        headers.get("access-control-allow-origin").is_none(),
+        "evil origin must not receive access-control-allow-origin header"
+    );
+    assert!(
+        headers.get("access-control-allow-credentials").is_none(),
+        "evil origin must not receive access-control-allow-credentials header"
+    );
+}
+
+#[tokio::test]
+async fn test_cors_outermost_layer_error_responses() {
+    let (app, _) = setup_test_app().await;
+
+    // 1. 401 from /v1/auth/refresh with no cookie from allowed origin
+    let req_401 = Request::builder()
+        .method("POST")
+        .uri("/v1/auth/refresh")
+        .header(ORIGIN, "http://localhost:3000")
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from("{}"))
+        .unwrap();
+
+    let res_401 = app.clone().oneshot(req_401).await.unwrap();
+    assert_eq!(res_401.status(), StatusCode::UNAUTHORIZED);
+    let headers_401 = res_401.headers();
+    assert_eq!(
+        headers_401.get("access-control-allow-origin").unwrap(),
+        "http://localhost:3000",
+        "401 error response from allowed origin must include CORS allow-origin"
+    );
+    assert_eq!(
+        headers_401.get("access-control-allow-credentials").unwrap(),
+        "true",
+        "401 error response from allowed origin must include credentials header"
+    );
+
+    // 2. 403 from /v1/auth/refresh with foreign origin
+    let req_403 = Request::builder()
+        .method("POST")
+        .uri("/v1/auth/refresh")
+        .header(ORIGIN, "https://evil.example")
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from("{}"))
+        .unwrap();
+
+    let res_403 = app.clone().oneshot(req_403).await.unwrap();
+    assert_eq!(res_403.status(), StatusCode::FORBIDDEN);
+    let headers_403 = res_403.headers();
+    assert!(
+        headers_403.get("access-control-allow-origin").is_none(),
+        "foreign origin must not receive access-control-allow-origin on 403 response"
+    );
+    assert!(
+        headers_403
+            .get("access-control-allow-credentials")
+            .is_none(),
+        "foreign origin must not receive access-control-allow-credentials on 403 response"
+    );
+}
+
+#[tokio::test]
+async fn test_csrf_foreign_origin_rejected_and_token_preserved() {
+    let (app, state) = setup_test_app().await;
+
+    // 1. Register a test user
+    let email = format!("csrf_test_{}@example.com", Uuid::new_v4());
+
+    let user = sqlx::query!(
+        "INSERT INTO users (email, timezone) VALUES ($1, 'UTC') RETURNING id",
+        email
+    )
+    .fetch_one(&state.pool)
+    .await
+    .unwrap();
+
+    // 2. Insert an active refresh token
+    let raw_refresh = jwt::generate_refresh_token();
+    let token_hash = jwt::hash_refresh_token(&raw_refresh);
+    let expires_at = Utc::now() + Duration::seconds(state.config.jwt_refresh_expiration_secs);
+
+    let token_record = sqlx::query!(
+        r#"
+        INSERT INTO refresh_tokens (user_id, token_hash, expires_at)
+        VALUES ($1, $2, $3)
+        RETURNING id, revoked
+        "#,
+        user.id,
+        token_hash,
+        expires_at
+    )
+    .fetch_one(&state.pool)
+    .await
+    .unwrap();
+
+    assert!(!token_record.revoked, "token must initially be active");
+
+    // 3. Foreign Origin (CSRF attack) attempts refresh
+    let attack_req = Request::builder()
+        .method("POST")
+        .uri("/v1/auth/refresh")
+        .header(ORIGIN, "https://evil.example")
+        .header(COOKIE, format!("refresh_token={}", raw_refresh))
+        .body(Body::empty())
+        .unwrap();
+
+    let attack_res = app.clone().oneshot(attack_req).await.unwrap();
+    assert_eq!(
+        attack_res.status(),
+        StatusCode::FORBIDDEN,
+        "foreign origin refresh must return 403 Forbidden"
+    );
+
+    // 4. Assert token was NOT rotated or revoked in database
+    let checked_token = sqlx::query!(
+        "SELECT revoked FROM refresh_tokens WHERE id = $1",
+        token_record.id
+    )
+    .fetch_one(&state.pool)
+    .await
+    .unwrap();
+
+    assert!(
+        !checked_token.revoked,
+        "refresh token must remain valid and unrevoked after rejected CSRF attempt"
+    );
+
+    // 5. Legitimate request from allowed origin succeeds and rotates token
+    let legit_req = Request::builder()
+        .method("POST")
+        .uri("/v1/auth/refresh")
+        .header(ORIGIN, "http://localhost:3000")
+        .header(COOKIE, format!("refresh_token={}", raw_refresh))
+        .body(Body::empty())
+        .unwrap();
+
+    let legit_res = app.clone().oneshot(legit_req).await.unwrap();
+    assert_eq!(
+        legit_res.status(),
+        StatusCode::OK,
+        "legitimate refresh after blocked attack must succeed"
+    );
+
+    // 6. Old token is now rotated (marked revoked)
+    let post_legit_token = sqlx::query!(
+        "SELECT revoked FROM refresh_tokens WHERE id = $1",
+        token_record.id
+    )
+    .fetch_one(&state.pool)
+    .await
+    .unwrap();
+
+    assert!(
+        post_legit_token.revoked,
+        "token must be rotated and marked revoked after legitimate refresh"
+    );
+
+    // 7. Test logout CSRF rejection
+    let attack_logout_req = Request::builder()
+        .method("POST")
+        .uri("/v1/auth/logout")
+        .header(ORIGIN, "https://evil.example")
+        .body(Body::empty())
+        .unwrap();
+
+    let attack_logout_res = app.oneshot(attack_logout_req).await.unwrap();
+    assert_eq!(
+        attack_logout_res.status(),
+        StatusCode::FORBIDDEN,
+        "foreign origin logout must return 403 Forbidden"
+    );
 }

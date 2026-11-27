@@ -5,6 +5,13 @@ const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080/v
 let currentAccessToken: string | null = null;
 let refreshPromise: Promise<string | null> | null = null;
 
+export class ApiError extends Error {
+  constructor(message: string, public status?: number) {
+    super(message);
+    this.name = "ApiError";
+  }
+}
+
 export function setAccessToken(token: string | null) {
   currentAccessToken = token;
 }
@@ -13,7 +20,7 @@ export function getAccessToken(): string | null {
   return currentAccessToken;
 }
 
-async function refreshAccessToken(): Promise<string | null> {
+export async function refreshAccessToken(): Promise<string | null> {
   if (refreshPromise) {
     return refreshPromise;
   }
@@ -28,15 +35,24 @@ async function refreshAccessToken(): Promise<string | null> {
 
       if (!res.ok) {
         currentAccessToken = null;
-        return null;
+        let errorMessage = `HTTP error ${res.status}`;
+        try {
+          const errJson = await res.json();
+          if (errJson?.error?.message) {
+            errorMessage = errJson.error.message;
+          }
+        } catch {
+          // ignore json parse error
+        }
+        throw new ApiError(errorMessage, res.status);
       }
 
       const data: RefreshResponse = await res.json();
       currentAccessToken = data.access_token;
       return data.access_token;
-    } catch {
+    } catch (err) {
       currentAccessToken = null;
-      return null;
+      throw err;
     } finally {
       refreshPromise = null;
     }
@@ -70,13 +86,17 @@ export async function apiClient<T>(
 
   // If unauthorized and we haven't already retried with a refresh
   if (response.status === 401 && !endpoint.includes("/auth/refresh") && !endpoint.includes("/auth/google")) {
-    const newAccessToken = await refreshAccessToken();
-    if (newAccessToken) {
-      headers.set("Authorization", `Bearer ${newAccessToken}`);
-      response = await fetch(url, {
-        ...fetchOptions,
-        headers,
-      });
+    try {
+      const newAccessToken = await refreshAccessToken();
+      if (newAccessToken) {
+        headers.set("Authorization", `Bearer ${newAccessToken}`);
+        response = await fetch(url, {
+          ...fetchOptions,
+          headers,
+        });
+      }
+    } catch {
+      // Refresh failed, proceed to handle error response below
     }
   }
 
@@ -90,7 +110,7 @@ export async function apiClient<T>(
     } catch {
       // ignore json parse error
     }
-    throw new Error(errorMessage);
+    throw new ApiError(errorMessage, response.status);
   }
 
   return response.json();
