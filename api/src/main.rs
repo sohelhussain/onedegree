@@ -10,7 +10,13 @@ use api::{
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    dotenvy::dotenv().ok();
+    if let Err(err) = dotenvy::dotenv() {
+        if !matches!(err, dotenvy::Error::Io(_)) {
+            eprintln!(
+                "Warning: .env contains a syntax error and was only partially loaded; relying on process environment variables."
+            );
+        }
+    }
 
     tracing_subscriber::fmt()
         .with_env_filter(
