@@ -32,12 +32,15 @@ declare global {
   }
 }
 
+let gsiInitializedClientId: string | null = null;
+let gsiCredentialHandler: ((credential: string) => void) | null = null;
+
 export function GoogleSignInButton({ onSuccess }: { onSuccess?: () => void }) {
   const { loginWithGoogle, isLoading } = useAuth();
   const buttonRef = useRef<HTMLDivElement>(null);
   const loginRef = useRef(loginWithGoogle);
   const onSuccessRef = useRef(onSuccess);
-  const initializedRef = useRef(false);
+  const renderedRef = useRef(false);
   const [scriptLoaded, setScriptLoaded] = useState(false);
   const [scriptFailed, setScriptFailed] = useState(false);
   const [fallbackVisible, setFallbackVisible] = useState(false);
@@ -78,28 +81,36 @@ export function GoogleSignInButton({ onSuccess }: { onSuccess?: () => void }) {
     if (!scriptLoaded || !window.google || !buttonRef.current || !hasValidClientId) {
       return;
     }
-    if (initializedRef.current) return;
+
+    gsiCredentialHandler = (credential: string) => {
+      void loginRef.current(credential).then(() => {
+        onSuccessRef.current?.();
+      });
+    };
 
     try {
-      window.google.accounts.id.initialize({
-        client_id: clientId,
-        callback: (res) => {
-          if (res.credential) {
-            void loginRef.current(res.credential).then(() => {
-              onSuccessRef.current?.();
-            });
-          }
-        },
-      });
+      if (gsiInitializedClientId !== clientId) {
+        window.google.accounts.id.initialize({
+          client_id: clientId,
+          callback: (res) => {
+            if (res.credential && gsiCredentialHandler) {
+              gsiCredentialHandler(res.credential);
+            }
+          },
+        });
+        gsiInitializedClientId = clientId;
+      }
 
-      window.google.accounts.id.renderButton(buttonRef.current, {
-        theme: "filled_black",
-        size: "large",
-        text: "continue_with",
-        shape: "pill",
-        width: 310,
-      });
-      initializedRef.current = true;
+      if (!renderedRef.current && buttonRef.current.childElementCount === 0) {
+        window.google.accounts.id.renderButton(buttonRef.current, {
+          theme: "filled_black",
+          size: "large",
+          text: "continue_with",
+          shape: "pill",
+          width: 310,
+        });
+      }
+      renderedRef.current = true;
     } catch {
       toast.error("Google sign-in failed to initialize.");
       Promise.resolve().then(() => {

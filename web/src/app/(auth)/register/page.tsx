@@ -42,18 +42,24 @@ export default function RegisterPage() {
     e.preventDefault();
     setErrorMessage(null);
 
-    if (password.length < 8) {
+    const trimmedEmail = email.trim();
+    const trimmedFullName = fullName.trim();
+    const submittedPassword = password;
+    setFullName("");
+    setEmail("");
+    setPassword("");
+
+    if (submittedPassword.length < 8) {
       setErrorMessage("Password must be at least 8 characters long.");
       return;
     }
 
     setSubmitting(true);
     try {
-      const trimmedEmail = email.trim();
       await registerAccount({
         email: trimmedEmail,
-        password,
-        full_name: fullName.trim() || undefined,
+        password: submittedPassword,
+        full_name: trimmedFullName || undefined,
       });
       toast.success("Account created! Check your email to verify.");
       router.push(`/check-email?email=${encodeURIComponent(trimmedEmail)}`);
@@ -88,9 +94,10 @@ export default function RegisterPage() {
               </label>
               <input
                 id="reg-name"
-                name="full_name"
+                name="register_full_name"
                 type="text"
-                autoComplete="name"
+                autoComplete="section-register name"
+                enterKeyHint="next"
                 value={fullName}
                 onChange={(e) => setFullName(e.target.value)}
                 placeholder="Alex Rivera"
@@ -107,9 +114,13 @@ export default function RegisterPage() {
               </label>
               <input
                 id="reg-email"
-                name="email"
+                name="register_email"
                 type="email"
-                autoComplete="email"
+                autoComplete="section-register email"
+                autoCorrect="off"
+                autoCapitalize="none"
+                spellCheck={false}
+                enterKeyHint="next"
                 required
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
@@ -127,9 +138,10 @@ export default function RegisterPage() {
               </label>
               <input
                 id="reg-password"
-                name="password"
+                name="register_new_password"
                 type="password"
-                autoComplete="new-password"
+                autoComplete="section-register new-password"
+                enterKeyHint="done"
                 required
                 minLength={8}
                 value={password}

@@ -37,18 +37,23 @@ function LoginView() {
     setErrorMessage(null);
     setNeedsVerificationEmail(null);
 
-    if (!email.trim() || !password) {
+    const submittedEmail = email.trim();
+    const submittedPassword = password;
+    setEmail("");
+    setPassword("");
+
+    if (!submittedEmail || !submittedPassword) {
       setErrorMessage("Please enter your email and password.");
       return;
     }
 
     setSubmitting(true);
     try {
-      await loginWithEmail(email.trim(), password);
+      await loginWithEmail(submittedEmail, submittedPassword);
       router.replace(nextPath);
     } catch (err: unknown) {
       if (err instanceof ApiError && err.code === "EMAIL_NOT_VERIFIED") {
-        setNeedsVerificationEmail(email.trim());
+        setNeedsVerificationEmail(submittedEmail);
         setErrorMessage("Verify your email before signing in.");
         toast.error("Please verify your email before signing in.");
       } else {
@@ -143,9 +148,13 @@ function LoginView() {
                 </label>
                 <input
                   id="login-email"
-                  name="email"
+                  name="login_email"
                   type="email"
-                  autoComplete="email"
+                  autoComplete="section-login username"
+                  autoCorrect="off"
+                  autoCapitalize="none"
+                  spellCheck={false}
+                  enterKeyHint="next"
                   required
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
@@ -171,9 +180,10 @@ function LoginView() {
                 </div>
                 <input
                   id="login-password"
-                  name="password"
+                  name="login_password"
                   type="password"
-                  autoComplete="current-password"
+                  autoComplete="section-login current-password"
+                  enterKeyHint="done"
                   required
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}

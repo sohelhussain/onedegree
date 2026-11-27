@@ -27,22 +27,27 @@ function ResetPasswordView() {
     e.preventDefault();
     setErrorMessage(null);
 
+    const submittedPassword = newPassword;
+    const submittedConfirm = confirmPassword;
+    setNewPassword("");
+    setConfirmPassword("");
+
     if (!token) {
       setErrorMessage("Reset token is missing or invalid.");
       return;
     }
-    if (newPassword.length < 8) {
+    if (submittedPassword.length < 8) {
       setErrorMessage("Password must be at least 8 characters long.");
       return;
     }
-    if (newPassword !== confirmPassword) {
+    if (submittedPassword !== submittedConfirm) {
       setErrorMessage("Passwords do not match.");
       return;
     }
 
     setSubmitting(true);
     try {
-      const res = await resetPasswordApi({ token, new_password: newPassword });
+      const res = await resetPasswordApi({ token, new_password: submittedPassword });
       setDoneMessage(res.message);
       toast.success("Password updated. Please sign in.");
     } catch (err: unknown) {

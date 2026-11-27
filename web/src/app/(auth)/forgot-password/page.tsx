@@ -33,10 +33,12 @@ export default function ForgotPasswordPage() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!email.trim()) return;
+    const submittedEmail = email.trim();
+    setEmail("");
+    if (!submittedEmail) return;
     setSubmitting(true);
     try {
-      const res = await forgotPasswordApi(email.trim());
+      const res = await forgotPasswordApi(submittedEmail);
       setSentMessage(res.message);
       toast.success("If registered, reset instructions were sent.");
     } catch (err: unknown) {
@@ -77,9 +79,13 @@ export default function ForgotPasswordPage() {
                 </label>
                 <input
                   id="forgot-email"
-                  name="email"
+                  name="forgot_email"
                   type="email"
                   autoComplete="email"
+                  autoCorrect="off"
+                  autoCapitalize="none"
+                  spellCheck={false}
+                  enterKeyHint="done"
                   required
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
