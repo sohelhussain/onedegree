@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE pending_registrations SET last_sent_at = now() - interval '25 hours' WHERE email = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "6606c0665a4ca3f7193e1425fcac5c5b0086606e1af12742e79e20dcb39ba6eb"
+}

@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE pending_registrations\n        SET token_hash = $2,\n            expires_at = $3,\n            last_sent_at = now(),\n            send_count = $4,\n            failed_attempts = 0\n        WHERE id = $1\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Varchar",
+        "Timestamptz",
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "56b2745e5f1a705ffb0d427a82e49d4be80152cafa016024de1807bba32048e8"
+}

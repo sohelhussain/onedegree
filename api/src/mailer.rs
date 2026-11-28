@@ -87,6 +87,11 @@ fn redact_tokens_and_keys(input: &str, api_key: &str) -> String {
 pub trait Mailer: Send + Sync {
     async fn send_verification_email(&self, to: &str, token: &str) -> Result<(), String>;
     async fn send_password_reset_email(&self, to: &str, token: &str) -> Result<(), String>;
+    async fn send_existing_account_notice(&self, to: &str) -> Result<(), String>;
+}
+
+pub fn login_link(web_base_url: &str) -> String {
+    format!("{}/login", web_base_url.trim_end_matches('/'))
 }
 
 pub fn verification_link(web_base_url: &str, token: &str) -> String {
@@ -148,6 +153,19 @@ impl Mailer for ConsoleMailer {
              [MAILER: PASSWORD RESET EMAIL]\n\
              To: {}\n\
              Reset Link: {}\n\
+             ========================================================================",
+            to, link
+        );
+        Ok(())
+    }
+
+    async fn send_existing_account_notice(&self, to: &str) -> Result<(), String> {
+        let link = login_link(&self.web_base_url);
+        info!(
+            "\n========================================================================\n\
+             [MAILER: EXISTING ACCOUNT NOTICE]\n\
+             To: {}\n\
+             Sign in: {}\n\
              ========================================================================",
             to, link
         );
@@ -228,6 +246,17 @@ impl Mailer for FileMailer {
             to,
             "Reset your 1degree password",
             token,
+            &url,
+        )
+    }
+
+    async fn send_existing_account_notice(&self, to: &str) -> Result<(), String> {
+        let url = login_link(&self.web_base_url);
+        self.append_entry(
+            "existing_account",
+            to,
+            "You already have a 1degree account",
+            "",
             &url,
         )
     }
@@ -405,6 +434,24 @@ impl Mailer for ResendMailer {
             link
         );
         self.dispatch(to, "Reset your 1degree password", &text, &html)
+            .await
+    }
+
+    async fn send_existing_account_notice(&self, to: &str) -> Result<(), String> {
+        let login = login_link(&self.web_base_url);
+        let reset = format!(
+            "{}/forgot-password",
+            self.web_base_url.trim_end_matches('/')
+        );
+        let text = format!(
+            "You already have a 1degree account.\n\nPlease sign in at:\n{}\n\nOr reset your password at:\n{}",
+            login, reset
+        );
+        let html = format!(
+            "<p>You already have a <strong>1degree</strong> account.</p><p><a href=\"{}\">Sign in</a> or <a href=\"{}\">reset your password</a>.</p>",
+            login, reset
+        );
+        self.dispatch(to, "You already have a 1degree account", &text, &html)
             .await
     }
 }

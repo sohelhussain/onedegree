@@ -45,7 +45,7 @@ async fn setup_test_app_with_mailer(mailer: Arc<dyn Mailer>) -> (Router, Arc<App
         "DATABASE_URL" => Some(db_url.clone()),
         "CORS_ORIGIN" => Some("http://localhost:3000".to_string()),
         "MAILER" => Some("console".to_string()),
-        "ADMIN_EMAILS" => Some("sohelhussaing@gmail.com".to_string()),
+        "ADMIN_EMAILS" => Some("admin_test@example.test".to_string()),
         _ => std::env::var(k).ok(),
     })
     .expect("Valid test configuration");
@@ -251,7 +251,8 @@ async fn test_replayed_refresh_token_revokes_all_sessions() {
 
 #[tokio::test]
 async fn test_hash_never_returned() {
-    let (app, state) = setup_test_app().await;
+    let mailer = Arc::new(RecordingMailer::default());
+    let (app, _state) = setup_test_app_with_mailer(mailer.clone()).await;
     let email = format!("nohash_{}@example.com", Uuid::new_v4());
     let password = "SuperSecurePassword123!";
 
@@ -277,14 +278,23 @@ async fn test_hash_never_returned() {
     assert!(!reg_str.contains("password_hash"));
     assert!(!reg_str.contains("argon2"));
 
-    // Verify user email before login
-    sqlx::query!(
-        "UPDATE users SET email_verified_at = now() WHERE LOWER(email) = $1",
-        email.to_lowercase()
-    )
-    .execute(&state.pool)
-    .await
-    .unwrap();
+    let ver_tok = mailer.sent_verification.lock().await[0].1.clone();
+    let ver_req = Request::builder()
+        .method("POST")
+        .uri("/v1/auth/verify-email")
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            serde_json::to_vec(&serde_json::json!({
+                "token": ver_tok,
+                "password": password
+            }))
+            .unwrap(),
+        ))
+        .unwrap();
+    assert_eq!(
+        app.clone().oneshot(ver_req).await.unwrap().status(),
+        StatusCode::OK
+    );
 
     // 2. Login
     let login_req = Request::builder()
@@ -348,18 +358,23 @@ async fn test_hash_never_returned() {
 
 #[tokio::test]
 async fn test_unverified_email_cannot_become_admin() {
-    let (app, state) = setup_test_app().await;
+    let mailer = Arc::new(RecordingMailer::default());
+    let (app, state) = setup_test_app_with_mailer(mailer.clone()).await;
 
-    // Use admin email from config (sohelhussaing@gmail.com)
-    let admin_email = "sohelhussaing@gmail.com";
+    let admin_email = "admin_test@example.test";
     let password = "AdminPassword123!";
 
-    // Delete existing record if any from previous test runs
     let _ = sqlx::query!("DELETE FROM users WHERE LOWER(email) = $1", admin_email)
         .execute(&state.pool)
         .await;
+    let _ = sqlx::query!(
+        "DELETE FROM pending_registrations WHERE email = $1",
+        admin_email
+    )
+    .execute(&state.pool)
+    .await;
 
-    // 1. Register with the admin email
+    // 1. Register with admin email -> creates pending_registrations ONLY, zero users rows
     let reg_req = Request::builder()
         .method("POST")
         .uri("/v1/auth/register")
@@ -377,60 +392,27 @@ async fn test_unverified_email_cannot_become_admin() {
     let reg_res = app.clone().oneshot(reg_req).await.unwrap();
     assert_eq!(reg_res.status(), StatusCode::CREATED);
 
-    // 2. Query user from DB: MUST be role='user', NOT 'admin' while unverified!
-    let user = sqlx::query!(
-        r#"SELECT role as "role: UserRole", email_verified_at FROM users WHERE LOWER(email) = $1"#,
+    let users_count: i64 = sqlx::query_scalar!(
+        "SELECT COUNT(*)::BIGINT FROM users WHERE LOWER(email) = $1",
         admin_email
     )
     .fetch_one(&state.pool)
     .await
-    .unwrap();
+    .unwrap()
+    .unwrap_or(0);
+    assert_eq!(users_count, 0, "Pending signup must not create a users row");
 
-    assert_eq!(
-        user.role,
-        UserRole::User,
-        "Unverified user MUST NOT have admin role"
-    );
-    assert!(
-        user.email_verified_at.is_none(),
-        "Email must be unverified initially"
-    );
+    let raw_token = mailer.sent_verification.lock().await[0].1.clone();
 
-    // 3. Test RequireAdmin extractor rejection:
-    let token_rec = sqlx::query!(
-        r#"
-        SELECT token_hash 
-        FROM email_verification_tokens evt
-        JOIN users u ON u.id = evt.user_id
-        WHERE LOWER(u.email) = $1
-        ORDER BY evt.created_at DESC LIMIT 1
-        "#,
-        admin_email
-    )
-    .fetch_one(&state.pool)
-    .await
-    .unwrap();
-
-    // 4. Verify email using raw token
-    // We update email_verification_tokens directly or test /v1/auth/verify-email
-    let raw_token = jwt::generate_refresh_token();
-    let new_hash = jwt::hash_refresh_token(&raw_token);
-    sqlx::query!(
-        "UPDATE email_verification_tokens SET token_hash = $1 WHERE token_hash = $2",
-        new_hash,
-        token_rec.token_hash
-    )
-    .execute(&state.pool)
-    .await
-    .unwrap();
-
+    // 2. Verify with password -> creates users row with admin role & deletes pending row
     let verify_req = Request::builder()
         .method("POST")
         .uri("/v1/auth/verify-email")
         .header(CONTENT_TYPE, "application/json")
         .body(Body::from(
             serde_json::to_vec(&serde_json::json!({
-                "token": raw_token
+                "token": raw_token,
+                "password": password
             }))
             .unwrap(),
         ))
@@ -439,7 +421,6 @@ async fn test_unverified_email_cannot_become_admin() {
     let verify_res = app.clone().oneshot(verify_req).await.unwrap();
     assert_eq!(verify_res.status(), StatusCode::OK);
 
-    // 5. Query user again: NOW role must be 'admin' because email was verified!
     let verified_user = sqlx::query!(
         r#"SELECT role as "role: UserRole", email_verified_at FROM users WHERE LOWER(email) = $1"#,
         admin_email
@@ -549,72 +530,145 @@ async fn test_admin_has_premium() {
 }
 
 #[tokio::test]
-async fn test_duplicate_email_rejected() {
-    let (app, state) = setup_test_app().await;
-    let email = format!("dupe_{}@example.com", Uuid::new_v4());
+async fn test_duplicate_and_existing_account_registration_is_generic_with_notice() {
+    let mailer = Arc::new(RecordingMailer::default());
+    let (app, state) = setup_test_app_with_mailer(mailer.clone()).await;
+    let email = format!("dupe_{}@example.test", Uuid::new_v4());
     let password = "TestPassword123!";
 
-    // 1. Initial registration
-    let reg1 = Request::builder()
+    // 1. Register pending email 5 times across cooldown gaps -> 1 pending row, 0 users rows, only newest token works
+    let mut app_cur = app.clone();
+    for attempt in 0..5 {
+        if attempt > 0 {
+            sqlx::query!(
+                "UPDATE pending_registrations SET last_sent_at = now() - interval '65 seconds' WHERE email = $1",
+                email
+            )
+            .execute(&state.pool)
+            .await
+            .unwrap();
+            app_cur = setup_test_app_with_mailer(mailer.clone()).await.0;
+        }
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/auth/register")
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&serde_json::json!({
+                    "email": if attempt % 2 == 1 { email.to_uppercase() } else { email.clone() },
+                    "password": password
+                }))
+                .unwrap(),
+            ))
+            .unwrap();
+        let res = app_cur.clone().oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::CREATED);
+    }
+
+    let pending_count: i64 = sqlx::query_scalar!(
+        "SELECT COUNT(*)::BIGINT FROM pending_registrations WHERE email = $1",
+        email
+    )
+    .fetch_one(&state.pool)
+    .await
+    .unwrap()
+    .unwrap_or(0);
+    assert_eq!(pending_count, 1);
+
+    let users_count: i64 = sqlx::query_scalar!(
+        "SELECT COUNT(*)::BIGINT FROM users WHERE LOWER(email) = $1",
+        email
+    )
+    .fetch_one(&state.pool)
+    .await
+    .unwrap()
+    .unwrap_or(0);
+    assert_eq!(users_count, 0);
+
+    let sent_tokens = mailer.sent_verification.lock().await;
+    assert_eq!(sent_tokens.len(), 5);
+    let old_tok = sent_tokens[0].1.clone();
+    let newest_tok = sent_tokens[4].1.clone();
+    drop(sent_tokens);
+
+    // Old link fails; newest verifies cleanly
+    let verify_old = Request::builder()
+        .method("POST")
+        .uri("/v1/auth/verify-email")
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            serde_json::to_vec(&json!({ "token": old_tok, "password": password })).unwrap(),
+        ))
+        .unwrap();
+    assert_eq!(
+        app.clone().oneshot(verify_old).await.unwrap().status(),
+        StatusCode::BAD_REQUEST
+    );
+
+    let verify_newest = Request::builder()
+        .method("POST")
+        .uri("/v1/auth/verify-email")
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            serde_json::to_vec(&json!({ "token": newest_tok, "password": password })).unwrap(),
+        ))
+        .unwrap();
+    assert_eq!(
+        app.clone().oneshot(verify_newest).await.unwrap().status(),
+        StatusCode::OK
+    );
+
+    // 2. Re-register verified password email -> identical 201 generic response, NO second user, sends notice ONCE
+    let fresh_mailer = Arc::new(RecordingMailer::default());
+    let (app_existing, _) = setup_test_app_with_mailer(fresh_mailer.clone()).await;
+    let req_verified = Request::builder()
         .method("POST")
         .uri("/v1/auth/register")
         .header(CONTENT_TYPE, "application/json")
         .body(Body::from(
-            serde_json::to_vec(&serde_json::json!({
-                "email": email,
-                "password": password
-            }))
-            .unwrap(),
+            serde_json::to_vec(&json!({ "email": email, "password": password })).unwrap(),
         ))
         .unwrap();
+    let res_v = app_existing.clone().oneshot(req_verified).await.unwrap();
+    assert_eq!(res_v.status(), StatusCode::CREATED);
+    let v_json: Value =
+        serde_json::from_slice(&res_v.into_body().collect().await.unwrap().to_bytes()).unwrap();
 
-    let res1 = app.clone().oneshot(reg1).await.unwrap();
-    assert_eq!(res1.status(), StatusCode::CREATED);
-
-    // 2. Duplicate registration with exact same email
-    let reg2 = Request::builder()
-        .method("POST")
-        .uri("/v1/auth/register")
-        .header(CONTENT_TYPE, "application/json")
-        .body(Body::from(
-            serde_json::to_vec(&serde_json::json!({
-                "email": email,
-                "password": password
-            }))
-            .unwrap(),
-        ))
+    // Compare against brand-new synthetic address
+    let brand_new = format!("brandnew_{}@example.test", Uuid::new_v4());
+    let res_n = app_existing
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/auth/register")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&json!({ "email": brand_new, "password": password }))
+                        .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
         .unwrap();
+    assert_eq!(res_n.status(), StatusCode::CREATED);
+    let n_json: Value =
+        serde_json::from_slice(&res_n.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(v_json["message"], n_json["message"]);
+    assert_eq!(
+        fresh_mailer.sent_existing_notice.lock().await.clone(),
+        vec![email.clone()]
+    );
 
-    let res2 = app.clone().oneshot(reg2).await.unwrap();
-    assert_eq!(res2.status(), StatusCode::BAD_REQUEST);
-
-    // 3. Duplicate registration with UPPERCASE email
-    let reg3 = Request::builder()
-        .method("POST")
-        .uri("/v1/auth/register")
-        .header(CONTENT_TYPE, "application/json")
-        .body(Body::from(
-            serde_json::to_vec(&serde_json::json!({
-                "email": email.to_uppercase(),
-                "password": password
-            }))
-            .unwrap(),
-        ))
-        .unwrap();
-
-    let res3 = app.clone().oneshot(reg3).await.unwrap();
-    assert_eq!(res3.status(), StatusCode::BAD_REQUEST);
-
-    // 4. Email already belongs to a Google account
-    let google_email = format!("google_{}@example.com", Uuid::new_v4());
+    // 3. Google account email -> creates nothing, generic 201, sends notice once
+    let google_email = format!("google_{}@example.test", Uuid::new_v4());
     let g_user = sqlx::query!(
-        "INSERT INTO users (email, timezone) VALUES ($1, 'UTC') RETURNING id",
+        "INSERT INTO users (email, timezone, email_verified_at) VALUES ($1, 'UTC', now()) RETURNING id",
         google_email
     )
     .fetch_one(&state.pool)
     .await
     .unwrap();
-
     sqlx::query!(
         "INSERT INTO auth_identities (user_id, provider, provider_user_id) VALUES ($1, 'google', $2)",
         g_user.id,
@@ -624,28 +678,24 @@ async fn test_duplicate_email_rejected() {
     .await
     .unwrap();
 
-    let reg4 = Request::builder()
-        .method("POST")
-        .uri("/v1/auth/register")
-        .header(CONTENT_TYPE, "application/json")
-        .body(Body::from(
-            serde_json::to_vec(&serde_json::json!({
-                "email": google_email,
-                "password": password
-            }))
-            .unwrap(),
-        ))
+    let res_g = app_existing
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/auth/register")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&json!({ "email": google_email, "password": password }))
+                        .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
         .unwrap();
-
-    let res4 = app.clone().oneshot(reg4).await.unwrap();
-    assert_eq!(res4.status(), StatusCode::BAD_REQUEST);
-    let body4 = res4.into_body().collect().await.unwrap().to_bytes();
-    let json4: Value = serde_json::from_slice(&body4).unwrap();
-    assert!(
-        json4["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("sign in with Google")
+    assert_eq!(res_g.status(), StatusCode::CREATED);
+    assert_eq!(
+        fresh_mailer.sent_existing_notice.lock().await.clone(),
+        vec![email, google_email]
     );
 }
 
@@ -1004,6 +1054,7 @@ async fn test_csrf_foreign_origin_rejected_and_token_preserved() {
 struct RecordingMailer {
     sent_verification: Arc<Mutex<Vec<(String, String)>>>,
     sent_reset: Arc<Mutex<Vec<(String, String)>>>,
+    sent_existing_notice: Arc<Mutex<Vec<String>>>,
 }
 
 #[async_trait::async_trait]
@@ -1021,6 +1072,11 @@ impl Mailer for RecordingMailer {
             .lock()
             .await
             .push((to.to_string(), token.to_string()));
+        Ok(())
+    }
+
+    async fn send_existing_account_notice(&self, to: &str) -> Result<(), String> {
+        self.sent_existing_notice.lock().await.push(to.to_string());
         Ok(())
     }
 }
@@ -1175,14 +1231,9 @@ async fn test_resend_verification_generic_cooldown_invalidation_and_rate_limit()
         "60s cooldown must suppress issuing a second email"
     );
 
-    // Move latest token created_at back 65 seconds -> cooldown elapsed
+    // Move pending last_sent_at back 65 seconds -> cooldown elapsed
     sqlx::query!(
-        r#"
-        UPDATE email_verification_tokens evt
-        SET created_at = now() - interval '65 seconds'
-        FROM users u
-        WHERE evt.user_id = u.id AND LOWER(u.email) = $1
-        "#,
+        "UPDATE pending_registrations SET last_sent_at = now() - interval '65 seconds' WHERE email = $1",
         email.to_lowercase()
     )
     .execute(&state.pool)
@@ -1210,7 +1261,7 @@ async fn test_resend_verification_generic_cooldown_invalidation_and_rate_limit()
         .uri("/v1/auth/verify-email")
         .header(CONTENT_TYPE, "application/json")
         .body(Body::from(
-            serde_json::to_vec(&json!({ "token": first_token })).unwrap(),
+            serde_json::to_vec(&json!({ "token": first_token, "password": password })).unwrap(),
         ))
         .unwrap();
     assert_eq!(
@@ -1224,7 +1275,7 @@ async fn test_resend_verification_generic_cooldown_invalidation_and_rate_limit()
         .uri("/v1/auth/verify-email")
         .header(CONTENT_TYPE, "application/json")
         .body(Body::from(
-            serde_json::to_vec(&json!({ "token": second_token })).unwrap(),
+            serde_json::to_vec(&json!({ "token": second_token, "password": password })).unwrap(),
         ))
         .unwrap();
     assert_eq!(
@@ -1299,7 +1350,7 @@ async fn test_expired_tokens_rejected_and_reset_revokes_sessions() {
 
     // Expire verification token -> rejected
     sqlx::query!(
-        "UPDATE email_verification_tokens SET expires_at = now() - interval '5 minutes' WHERE token_hash = $1",
+        "UPDATE pending_registrations SET expires_at = now() - interval '5 minutes' WHERE token_hash = $1",
         jwt::hash_refresh_token(&ver_token)
     )
     .execute(&state.pool)
@@ -1311,7 +1362,7 @@ async fn test_expired_tokens_rejected_and_reset_revokes_sessions() {
         .uri("/v1/auth/verify-email")
         .header(CONTENT_TYPE, "application/json")
         .body(Body::from(
-            serde_json::to_vec(&json!({ "token": ver_token })).unwrap(),
+            serde_json::to_vec(&json!({ "token": ver_token, "password": password })).unwrap(),
         ))
         .unwrap();
     assert_eq!(
@@ -1319,14 +1370,33 @@ async fn test_expired_tokens_rejected_and_reset_revokes_sessions() {
         StatusCode::BAD_REQUEST
     );
 
-    // Mark user verified, log in to obtain active refresh token, then test forgot/reset
+    // Restore expiry -> verify cleanly to create verified user -> log in
     sqlx::query!(
-        "UPDATE users SET email_verified_at = now() WHERE LOWER(email) = $1",
-        email.to_lowercase()
+        "UPDATE pending_registrations SET expires_at = now() + interval '1 hour' WHERE token_hash = $1",
+        jwt::hash_refresh_token(&ver_token)
     )
     .execute(&state.pool)
     .await
     .unwrap();
+
+    assert_eq!(
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/auth/verify-email")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({ "token": ver_token, "password": password }))
+                            .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
 
     let login_res = app
         .clone()
@@ -1541,8 +1611,19 @@ async fn test_google_jwks_override_validates_aud_iss_exp_and_creates_verified_us
     header.kid = Some("test-kid-1".to_string());
     let now_ts = Utc::now().timestamp() as usize;
 
-    // 1. Valid token creates verified user
+    // 1. Valid token creates verified user and clears any pending registration for that email
     let g_email = format!("google_mock_{}@example.test", Uuid::new_v4());
+    sqlx::query!(
+        r#"
+        INSERT INTO pending_registrations (email, password_hash, token_hash, expires_at)
+        VALUES ($1, 'pending_hash', $2, now() + interval '24 hours')
+        "#,
+        g_email,
+        jwt::hash_refresh_token(&format!("pend_{}", Uuid::new_v4()))
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
     let valid_payload = GoogleIdTokenPayload {
         iss: "https://accounts.google.com".into(),
         aud: config.google_client_id.clone(),
@@ -1573,6 +1654,19 @@ async fn test_google_jwks_override_validates_aud_iss_exp_and_creates_verified_us
         serde_json::from_slice(&res_ok.into_body().collect().await.unwrap().to_bytes()).unwrap();
     assert_eq!(body_ok["user"]["email"], g_email);
     assert_eq!(body_ok["user"]["email_verified"], true);
+
+    let pending_left: i64 = sqlx::query_scalar!(
+        "SELECT COUNT(*)::BIGINT FROM pending_registrations WHERE email = $1",
+        g_email
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap()
+    .unwrap_or(0);
+    assert_eq!(
+        pending_left, 0,
+        "Google auth must delete pending registration"
+    );
 
     // 2. Wrong aud rejected
     let bad_aud = encode(
@@ -1694,14 +1788,23 @@ async fn test_email_variants_normalization_and_validation_rejects_malformed_and_
         let res = app.clone().oneshot(req).await.unwrap();
         assert_eq!(res.status(), StatusCode::CREATED, "email {}", raw_email);
 
-        let stored_email: Option<String> = sqlx::query_scalar!(
-            "SELECT email FROM users WHERE LOWER(email) = $1",
+        let stored_email: String = sqlx::query_scalar!(
+            "SELECT email FROM pending_registrations WHERE email = $1",
             expected_email
         )
         .fetch_one(&state.pool)
         .await
         .unwrap();
-        assert_eq!(stored_email.as_deref(), Some(expected_email.as_str()));
+        assert_eq!(stored_email, expected_email);
+        let user_count: i64 = sqlx::query_scalar!(
+            "SELECT COUNT(*)::BIGINT FROM users WHERE LOWER(email) = $1",
+            expected_email
+        )
+        .fetch_one(&state.pool)
+        .await
+        .unwrap()
+        .unwrap_or(0);
+        assert_eq!(user_count, 0, "Pending signup must not create a users row");
     }
 
     // 2. Rejected variants: >254 chars, no dot, two @, raw unicode, emoji, CRLF (never 500)
@@ -1784,7 +1887,7 @@ async fn test_email_variants_normalization_and_validation_rejects_malformed_and_
 
 #[tokio::test]
 async fn test_password_bounds_and_1mb_rejected_quickly_before_argon2() {
-    let (app, state) = setup_test_app().await;
+    let (app, _state) = setup_test_app().await;
     let id = Uuid::new_v4();
 
     // 7 chars rejected
@@ -1866,7 +1969,9 @@ async fn test_password_bounds_and_1mb_rejected_quickly_before_argon2() {
         elapsed
     );
 
-    // Unicode + spaces password works cleanly
+    // Unicode + spaces password works cleanly (verified via pending_registrations token)
+    let uni_mailer = Arc::new(RecordingMailer::default());
+    let (app_uni, _) = setup_test_app_with_mailer(uni_mailer.clone()).await;
     let unicode_email = format!("pwuni_{}@example.test", id);
     let unicode_pw = "päss wörd 🔐 123";
     let uni_reg = Request::builder()
@@ -1882,16 +1987,29 @@ async fn test_password_bounds_and_1mb_rejected_quickly_before_argon2() {
         ))
         .unwrap();
     assert_eq!(
-        app.clone().oneshot(uni_reg).await.unwrap().status(),
+        app_uni.clone().oneshot(uni_reg).await.unwrap().status(),
         StatusCode::CREATED
     );
-    sqlx::query!(
-        "UPDATE users SET email_verified_at = now() WHERE LOWER(email) = $1",
-        unicode_email.to_lowercase()
-    )
-    .execute(&state.pool)
-    .await
-    .unwrap();
+    let uni_tok = uni_mailer.sent_verification.lock().await[0].1.clone();
+    assert_eq!(
+        app_uni
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/auth/verify-email")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({ "token": uni_tok, "password": unicode_pw }))
+                            .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
 
     let uni_login = Request::builder()
         .method("POST")
@@ -1902,7 +2020,7 @@ async fn test_password_bounds_and_1mb_rejected_quickly_before_argon2() {
         ))
         .unwrap();
     assert_eq!(
-        app.oneshot(uni_login).await.unwrap().status(),
+        app_uni.oneshot(uni_login).await.unwrap().status(),
         StatusCode::OK
     );
 }
@@ -1945,7 +2063,7 @@ async fn test_verification_token_isolation_tampered_and_expired() {
                 .uri("/v1/auth/verify-email")
                 .header(CONTENT_TYPE, "application/json")
                 .body(Body::from(
-                    serde_json::to_vec(&json!({ "token": tampered })).unwrap(),
+                    serde_json::to_vec(&json!({ "token": tampered, "password": pw })).unwrap(),
                 ))
                 .unwrap(),
         )
@@ -1953,7 +2071,7 @@ async fn test_verification_token_isolation_tampered_and_expired() {
         .unwrap();
     assert_eq!(res_tampered.status(), StatusCode::BAD_REQUEST);
 
-    // Submitting User B's token verifies User B only; User A remains unverified (403)
+    // Submitting User B's token verifies User B only; User A remains pending/unverified (403)
     let res_b = app
         .clone()
         .oneshot(
@@ -1962,7 +2080,7 @@ async fn test_verification_token_isolation_tampered_and_expired() {
                 .uri("/v1/auth/verify-email")
                 .header(CONTENT_TYPE, "application/json")
                 .body(Body::from(
-                    serde_json::to_vec(&json!({ "token": tok_b })).unwrap(),
+                    serde_json::to_vec(&json!({ "token": tok_b, "password": pw })).unwrap(),
                 ))
                 .unwrap(),
         )
@@ -1986,10 +2104,10 @@ async fn test_verification_token_isolation_tampered_and_expired() {
         .unwrap();
     assert_eq!(login_a.status(), StatusCode::FORBIDDEN);
 
-    // Expire User A's token in DB -> fails cleanly with 400
+    // Expire User A's pending token in DB -> fails cleanly with 400
     let hash_a = jwt::hash_refresh_token(&tok_a);
     sqlx::query!(
-        "UPDATE email_verification_tokens SET expires_at = now() - interval '1 hour' WHERE token_hash = $1",
+        "UPDATE pending_registrations SET expires_at = now() - interval '1 hour' WHERE token_hash = $1",
         hash_a
     )
     .execute(&state.pool)
@@ -2003,7 +2121,7 @@ async fn test_verification_token_isolation_tampered_and_expired() {
                 .uri("/v1/auth/verify-email")
                 .header(CONTENT_TYPE, "application/json")
                 .body(Body::from(
-                    serde_json::to_vec(&json!({ "token": tok_a })).unwrap(),
+                    serde_json::to_vec(&json!({ "token": tok_a, "password": pw })).unwrap(),
                 ))
                 .unwrap(),
         )
@@ -2146,6 +2264,9 @@ async fn test_mailer_500_allows_user_creation_and_recovery_plus_sql_chars_in_nam
         async fn send_password_reset_email(&self, _to: &str, _token: &str) -> Result<(), String> {
             Ok(())
         }
+        async fn send_existing_account_notice(&self, _to: &str) -> Result<(), String> {
+            Ok(())
+        }
     }
 
     let mailer = Arc::new(ToggleMailer {
@@ -2158,7 +2279,7 @@ async fn test_mailer_500_allows_user_creation_and_recovery_plus_sql_chars_in_nam
     let sql_name = "O'Reilly'; DROP TABLE users;--";
     let pw = "ValidPassword123!";
 
-    // Register during mailer 500 still returns 201 and creates user safely
+    // Register during mailer 500 still returns 201 and creates pending row safely
     let reg = Request::builder()
         .method("POST")
         .uri("/v1/auth/register")
@@ -2178,7 +2299,7 @@ async fn test_mailer_500_allows_user_creation_and_recovery_plus_sql_chars_in_nam
     );
 
     let stored_name: Option<String> = sqlx::query_scalar!(
-        "SELECT full_name FROM users WHERE LOWER(email) = $1",
+        "SELECT full_name FROM pending_registrations WHERE email = $1",
         email.to_lowercase()
     )
     .fetch_one(&state.pool)
@@ -2188,12 +2309,7 @@ async fn test_mailer_500_allows_user_creation_and_recovery_plus_sql_chars_in_nam
 
     // Recover once mailer works again after cooldown elapses
     sqlx::query!(
-        r#"
-        UPDATE email_verification_tokens evt
-        SET created_at = now() - interval '65 seconds'
-        FROM users u
-        WHERE evt.user_id = u.id AND LOWER(u.email) = $1
-        "#,
+        "UPDATE pending_registrations SET last_sent_at = now() - interval '65 seconds' WHERE email = $1",
         email.to_lowercase()
     )
     .execute(&state.pool)
@@ -2220,8 +2336,235 @@ async fn test_mailer_500_allows_user_creation_and_recovery_plus_sql_chars_in_nam
         .uri("/v1/auth/verify-email")
         .header(CONTENT_TYPE, "application/json")
         .body(Body::from(
-            serde_json::to_vec(&json!({ "token": recovered_tok })).unwrap(),
+            serde_json::to_vec(&json!({ "token": recovered_tok, "password": pw })).unwrap(),
         ))
         .unwrap();
     assert_eq!(app.oneshot(verify).await.unwrap().status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_verify_email_5_wrong_passwords_invalidates_token_and_parallel_verify_creates_one_user()
+ {
+    let mailer = Arc::new(RecordingMailer::default());
+    let (app, state) = setup_test_app_with_mailer(mailer.clone()).await;
+
+    let email = format!("lockout_{}@example.test", Uuid::new_v4());
+    let password = "CorrectPassword123!";
+
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/auth/register")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&json!({ "email": email, "password": password })).unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let tok1 = mailer.sent_verification.lock().await[0].1.clone();
+
+    // Pre-hijack / wrong password 5 times invalidates token permanently
+    for attempt in 1..=5 {
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/auth/verify-email")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(
+                            &json!({ "token": tok1, "password": format!("WrongPass{}!", attempt) }),
+                        )
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    }
+
+    // Correct password on 6th attempt must now FAIL because token was invalidated
+    let res_6 = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/auth/verify-email")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&json!({ "token": tok1, "password": password })).unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res_6.status(), StatusCode::BAD_REQUEST);
+
+    // Resend after cooldown issues valid fresh token
+    sqlx::query!(
+        "UPDATE pending_registrations SET last_sent_at = now() - interval '65 seconds' WHERE email = $1",
+        email
+    )
+    .execute(&state.pool)
+    .await
+    .unwrap();
+
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/auth/resend-verification")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&json!({ "email": email })).unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let tok2 = mailer.sent_verification.lock().await[1].1.clone();
+
+    // Parallel verify with same token creates strictly ONE user
+    let req_p1 = Request::builder()
+        .method("POST")
+        .uri("/v1/auth/verify-email")
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            serde_json::to_vec(&json!({ "token": tok2, "password": password })).unwrap(),
+        ))
+        .unwrap();
+    let req_p2 = Request::builder()
+        .method("POST")
+        .uri("/v1/auth/verify-email")
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            serde_json::to_vec(&json!({ "token": tok2, "password": password })).unwrap(),
+        ))
+        .unwrap();
+
+    let (r1, r2) = tokio::join!(app.clone().oneshot(req_p1), app.clone().oneshot(req_p2));
+    let s1 = r1.unwrap().status();
+    let s2 = r2.unwrap().status();
+    assert!(
+        (s1 == StatusCode::OK && s2 == StatusCode::BAD_REQUEST)
+            || (s2 == StatusCode::OK && s1 == StatusCode::BAD_REQUEST),
+        "Expected one 200 and one 400 from parallel verify, got {} and {}",
+        s1,
+        s2
+    );
+
+    let count: i64 = sqlx::query_scalar!(
+        "SELECT COUNT(*)::BIGINT FROM users WHERE LOWER(email) = $1",
+        email
+    )
+    .fetch_one(&state.pool)
+    .await
+    .unwrap()
+    .unwrap_or(0);
+    assert_eq!(count, 1);
+}
+
+#[tokio::test]
+async fn test_daily_cap_5_and_24h_reset_plus_google_clears_pending() {
+    let mailer = Arc::new(RecordingMailer::default());
+    let (app, state) = setup_test_app_with_mailer(mailer.clone()).await;
+
+    let email = format!("cap_{}@example.test", Uuid::new_v4());
+    let pw = "ValidPassword123!";
+
+    // 5 sends across 65s cooldown windows succeed (send #1 via register + #2..#5 via resend)
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/auth/register")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&json!({ "email": email, "password": pw })).unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    for i in 0..4 {
+        sqlx::query!(
+            "UPDATE pending_registrations SET last_sent_at = now() - interval '65 seconds' WHERE email = $1",
+            email
+        )
+        .execute(&state.pool)
+        .await
+        .unwrap();
+
+        let _ = i;
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/auth/resend-verification")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({ "email": email })).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+    }
+    assert_eq!(mailer.sent_verification.lock().await.len(), 5);
+
+    // 6th within 24h after cooldown is capped (generic 200, no email sent)
+    sqlx::query!(
+        "UPDATE pending_registrations SET last_sent_at = now() - interval '65 seconds' WHERE email = $1",
+        email
+    )
+    .execute(&state.pool)
+    .await
+    .unwrap();
+
+    let (app2, _) = setup_test_app_with_mailer(mailer.clone()).await;
+    app2.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/auth/resend-verification")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&json!({ "email": email })).unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(mailer.sent_verification.lock().await.len(), 5);
+
+    // Shift last_sent_at back 25 hours -> send_count resets to 1 and 6th email sends!
+    sqlx::query!(
+        "UPDATE pending_registrations SET last_sent_at = now() - interval '25 hours' WHERE email = $1",
+        email
+    )
+    .execute(&state.pool)
+    .await
+    .unwrap();
+
+    app2.oneshot(
+        Request::builder()
+            .method("POST")
+            .uri("/v1/auth/resend-verification")
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&json!({ "email": email })).unwrap(),
+            ))
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(mailer.sent_verification.lock().await.len(), 6);
 }

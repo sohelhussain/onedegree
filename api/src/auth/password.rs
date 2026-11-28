@@ -2,8 +2,22 @@ use argon2::{
     Argon2,
     password_hash::{PasswordHasher, PasswordVerifier},
 };
+use std::sync::OnceLock;
 
 use crate::errors::ApiError;
+
+static DUMMY_HASH: OnceLock<String> = OnceLock::new();
+
+fn dummy_password_hash() -> &'static str {
+    DUMMY_HASH.get_or_init(|| {
+        hash_password("dummy-timing-equalizer-password-1degree")
+            .unwrap_or_else(|_| "$argon2id$v=19$m=19456,t=2,p=1$AAAAAAAAAAAAAAAAAAAAAA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".to_string())
+    })
+}
+
+pub fn verify_dummy_password(password: &str) {
+    let _ = verify_password(password, dummy_password_hash());
+}
 
 pub const MIN_PASSWORD_CHARS: usize = 8;
 pub const MAX_PASSWORD_CHARS: usize = 128;
