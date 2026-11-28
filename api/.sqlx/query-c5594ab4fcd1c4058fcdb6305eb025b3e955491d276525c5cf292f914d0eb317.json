@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO todos (user_id, title, target_date, duration_minutes) VALUES ($1, 'Read', $2, -1)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Date"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "c5594ab4fcd1c4058fcdb6305eb025b3e955491d276525c5cf292f914d0eb317"
+}

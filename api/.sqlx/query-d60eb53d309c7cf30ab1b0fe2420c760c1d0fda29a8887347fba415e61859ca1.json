@@ -1,0 +1,19 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO pending_registrations\n            (email, full_name, password_hash, token_hash, expires_at, last_sent_at, send_count, failed_attempts)\n        VALUES ($1, $2, $3, $4, $5, now(), $6, 0)\n        ON CONFLICT (email) DO UPDATE SET\n            full_name = EXCLUDED.full_name,\n            password_hash = EXCLUDED.password_hash,\n            token_hash = EXCLUDED.token_hash,\n            expires_at = EXCLUDED.expires_at,\n            last_sent_at = now(),\n            send_count = EXCLUDED.send_count,\n            failed_attempts = 0\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Varchar",
+        "Varchar",
+        "Varchar",
+        "Varchar",
+        "Timestamptz",
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "d60eb53d309c7cf30ab1b0fe2420c760c1d0fda29a8887347fba415e61859ca1"
+}

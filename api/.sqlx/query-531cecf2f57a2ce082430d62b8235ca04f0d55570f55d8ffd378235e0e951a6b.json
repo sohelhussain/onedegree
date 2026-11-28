@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE pending_registrations SET expires_at = now() - interval '5 minutes' WHERE token_hash = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "531cecf2f57a2ce082430d62b8235ca04f0d55570f55d8ffd378235e0e951a6b"
+}

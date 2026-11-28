@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO daily_actions (goal_id, user_id, title, duration_minutes) VALUES ($1, $2, 'Pushups', 30) RETURNING id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "9aa4a52b16657b51ba88ffa2eeade7fdf9189035a80a2599e0eae3b5fcaa7b0e"
+}
