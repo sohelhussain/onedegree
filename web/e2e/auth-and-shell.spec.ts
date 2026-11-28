@@ -105,7 +105,7 @@ async function confirmEmailVerification(page: Page, verifyUrl: string, password:
 
     await fillField(page.locator("#verify-password"), password);
     await page.getByRole("button", { name: "Verify email" }).click();
-    await expect(page.getByTestId("verify-success-heading")).toBeVisible();
+    await page.waitForURL(/\/today/);
     expect(verifyPostCount).toBe(1);
   } finally {
     page.off("request", listener);
@@ -358,9 +358,14 @@ test.describe("1degree Auth & Mobile-First Shell", () => {
     const password = makeRandomPassword();
     const startIdx = outboxLineCount();
 
+    let verifySetCookie = "";
     let loginSetCookie = "";
     let refreshSetCookie = "";
     page.on("response", async (res) => {
+      if (res.url().includes("/v1/auth/verify-email") && res.status() === 200) {
+        const headers = await res.allHeaders();
+        verifySetCookie = headers["set-cookie"] || "";
+      }
       if (res.url().includes("/v1/auth/login") && res.status() === 200) {
         const headers = await res.allHeaders();
         loginSetCookie = headers["set-cookie"] || "";
@@ -399,11 +404,16 @@ test.describe("1degree Auth & Mobile-First Shell", () => {
     ).toBeVisible();
     await expect(page.getByRole("button", { name: "Resend verification" })).toBeVisible();
 
-    // 4. Open verification URL -> token removed from address bar -> enter password -> verified state
+    // 4. Open verification URL -> token stripped -> enter password -> lands directly in /today
     await confirmEmailVerification(page, verMail.url, password);
+    await expect(page.getByTestId("today-greeting")).toContainText("Welcome, QA Runner");
+    expect(verifySetCookie).toContain("HttpOnly");
+    expect(verifySetCookie).toContain("SameSite=Lax");
+    expect(verifySetCookie).toContain("Path=/v1/auth");
 
-    // 5. Sign in cleanly -> lands in /today shell
-    await page.getByRole("link", { name: "Continue to sign in" }).click();
+    // 5. Log out and sign in cleanly -> lands back in /today shell
+    await page.getByRole("button", { name: "Account menu" }).click();
+    await page.getByRole("menuitem", { name: "Log out" }).click();
     await page.waitForURL(/\/login/);
     await page.waitForLoadState("networkidle");
     await page.getByRole("tab", { name: "Email" }).click();
@@ -487,9 +497,12 @@ test.describe("1degree Auth & Mobile-First Shell", () => {
     await page.waitForURL(/\/check-email/);
     const { entry: verMail } = await waitForOutboxEntry(email, "verification", startIdx);
     await confirmEmailVerification(page, verMail.url, password);
+    await page.getByRole("button", { name: "Account menu" }).click();
+    await page.getByRole("menuitem", { name: "Log out" }).click();
+    await page.waitForURL(/\/login/);
 
     // Generic error parity: wrong password vs unknown email
-    await page.goto("/login", { waitUntil: "networkidle" });
+    await page.waitForLoadState("networkidle");
     await page.getByRole("tab", { name: "Email" }).click();
     await fillField(page.getByLabel("Email"), email);
     await fillField(page.getByLabel("Password"), "DefinitelyWrong99!");
@@ -801,19 +814,9 @@ test.describe("1degree Auth & Mobile-First Shell", () => {
     await expect(pageB.getByTestId("verify-error")).toBeVisible();
     await expect(pageB.getByTestId("verify-success-heading")).toHaveCount(0);
 
-    // Correct password succeeds cleanly
+    // Correct password verifies and navigates directly to /today at 1280x800; check D.11 safe rendering
     await fillField(pageB.locator("#verify-password"), attackerPass);
     await pageB.getByRole("button", { name: "Verify email" }).click();
-    await expect(pageB.getByTestId("verify-success-heading")).toBeVisible();
-
-    // Sign in in Context B at 1280x800 and check D.11 safe rendering of script/SQL name
-    await pageB.getByRole("link", { name: "Continue to sign in" }).click();
-    await pageB.waitForURL(/\/login/);
-    await pageB.waitForLoadState("networkidle");
-    await pageB.getByRole("tab", { name: "Email" }).click();
-    await fillField(pageB.locator("#login-email"), attackerEmail);
-    await fillField(pageB.locator("#login-password"), attackerPass);
-    await pageB.locator("#login-password").press("Enter");
     await pageB.waitForURL(/\/today/);
     await expect(pageB.getByTestId("today-greeting")).toContainText(attackerName);
     expect(dialogFired).toBe(false);
@@ -897,9 +900,12 @@ test.describe("1degree Auth & Mobile-First Shell", () => {
     await page.waitForURL(/\/check-email/);
     const { entry: verMail } = await waitForOutboxEntry(email, "verification", startIdx);
     await confirmEmailVerification(page, verMail.url, password);
+    await page.getByRole("button", { name: "Account menu" }).click();
+    await page.getByRole("menuitem", { name: "Log out" }).click();
+    await page.waitForURL(/\/login/);
 
-    // Go to /login -> working Google button must stay visible > 10s
-    await page.goto("/login", { waitUntil: "networkidle" });
+    // /login -> working Google button must stay visible > 10s
+    await page.waitForLoadState("networkidle");
     await expect(page.getByTestId("stub-gsi-button")).toBeVisible();
     await page.waitForTimeout(10_500);
     await expect(page.getByTestId("stub-gsi-button")).toBeVisible();

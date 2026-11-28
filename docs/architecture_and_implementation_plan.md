@@ -269,7 +269,7 @@ onedegree/
 | `POST` | `/v1/auth/google` | Verify Google ID token, link identity, issue tokens | No |
 | `POST` | `/v1/auth/register` | Register with email & password (Argon2id, min 8 chars, rate-limited) | No |
 | `POST` | `/v1/auth/login` | Login with email & password (rate-limited, requires verified email or 403 `EMAIL_NOT_VERIFIED`) | No |
-| `POST` | `/v1/auth/verify-email` | Verify `{ token, password }` to create verified user & clear pending row | No |
+| `POST` | `/v1/auth/verify-email` | Verify `{ token, password }` to create verified user, clear pending row & issue session | No |
 | `POST` | `/v1/auth/resend-verification` | Resend verification link (generic 200, 60s cooldown, invalidates old tokens) | No |
 | `POST` | `/v1/auth/forgot-password` | Dispatch password reset token email via Mailer | No |
 | `POST` | `/v1/auth/reset-password` | Reset password using single-use token & revoke sessions | No |

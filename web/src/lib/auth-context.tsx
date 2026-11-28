@@ -15,6 +15,7 @@ import {
   refreshAccessToken,
   setUnauthorizedHandler,
   loginWithEmailApi,
+  verifyEmailApi,
   ApiError,
 } from "./api";
 import { toast } from "sonner";
@@ -25,6 +26,7 @@ interface AuthContextType {
   isLoading: boolean;
   loginWithGoogle: (idToken: string) => Promise<void>;
   loginWithEmail: (email: string, password: string) => Promise<void>;
+  verifyEmailAndLogin: (token: string, password: string) => Promise<void>;
   logout: () => Promise<void>;
   updateTimezone: (timezone: string) => Promise<void>;
   refreshSession: () => Promise<boolean>;
@@ -125,39 +127,61 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     };
   }, [clearSessionState]);
 
-  const loginWithGoogle = useCallback(async (idToken: string) => {
-    try {
-      setIsLoading(true);
-      const res = await apiClient<AuthResponse>("/auth/google", {
-        method: "POST",
-        body: JSON.stringify({ id_token: idToken }),
-      });
-
-      setAccessToken(res.access_token);
-      setToken(res.access_token);
-      setUser(res.user);
-      toast.success("Signed in with Google successfully!");
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : "Authentication failed";
-      toast.error(msg);
-      throw err;
-    } finally {
-      setIsLoading(false);
-    }
+  const applyAuthSession = useCallback((res: AuthResponse) => {
+    setAccessToken(res.access_token);
+    setToken(res.access_token);
+    setUser(res.user);
   }, []);
 
-  const loginWithEmail = useCallback(async (email: string, password: string) => {
-    try {
-      setIsLoading(true);
-      const res = await loginWithEmailApi({ email, password });
-      setAccessToken(res.access_token);
-      setToken(res.access_token);
-      setUser(res.user);
-      toast.success("Welcome back!");
-    } finally {
-      setIsLoading(false);
-    }
-  }, []);
+  const loginWithGoogle = useCallback(
+    async (idToken: string) => {
+      try {
+        setIsLoading(true);
+        const res = await apiClient<AuthResponse>("/auth/google", {
+          method: "POST",
+          body: JSON.stringify({ id_token: idToken }),
+        });
+
+        applyAuthSession(res);
+        toast.success("Signed in with Google successfully!");
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : "Authentication failed";
+        toast.error(msg);
+        throw err;
+      } finally {
+        setIsLoading(false);
+      }
+    },
+    [applyAuthSession]
+  );
+
+  const loginWithEmail = useCallback(
+    async (email: string, password: string) => {
+      try {
+        setIsLoading(true);
+        const res = await loginWithEmailApi({ email, password });
+        applyAuthSession(res);
+        toast.success("Welcome back!");
+      } finally {
+        setIsLoading(false);
+      }
+    },
+    [applyAuthSession]
+  );
+
+  const verifyEmailAndLogin = useCallback(
+    async (token: string, password: string) => {
+      try {
+        setIsLoading(true);
+        const res = await verifyEmailApi({ token, password });
+        applyAuthSession(res);
+        toast.success("Email verified! Welcome to 1degree.");
+      } finally {
+        setIsLoading(false);
+      }
+    },
+    [applyAuthSession]
+  );
 
   const logout = useCallback(async () => {
     try {
@@ -194,6 +218,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         isLoading,
         loginWithGoogle,
         loginWithEmail,
+        verifyEmailAndLogin,
         logout,
         updateTimezone,
         refreshSession,

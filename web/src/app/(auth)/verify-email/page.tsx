@@ -2,11 +2,13 @@
 
 import { Suspense, useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import { useSearchParams } from "next/navigation";
-import { verifyEmailApi } from "@/lib/api";
+import { useRouter, useSearchParams } from "next/navigation";
+import { useAuth } from "@/lib/auth-context";
 import { AlertCircle, CheckCircle2, Loader2, ShieldCheck, XCircle } from "lucide-react";
 
 function VerifyEmailView() {
+  const router = useRouter();
+  const { verifyEmailAndLogin } = useAuth();
   const searchParams = useSearchParams();
   const initialToken = searchParams.get("token");
   const passwordInputRef = useRef<HTMLInputElement>(null);
@@ -19,7 +21,7 @@ function VerifyEmailView() {
     initialToken?.trim() ? "prompt" : "error"
   );
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const [message, setMessage] = useState(() =>
+  const [message] = useState(() =>
     initialToken?.trim() ? "" : "Verification link is missing or incomplete."
   );
 
@@ -47,9 +49,9 @@ function VerifyEmailView() {
     submittingRef.current = true;
     setSubmitting(true);
     try {
-      const res = await verifyEmailApi({ token, password: submittedPassword });
+      await verifyEmailAndLogin(token, submittedPassword);
       setStatus("success");
-      setMessage(res.message || "Email verified! You can now sign in.");
+      router.replace("/today");
     } catch (err: unknown) {
       const msg =
         err instanceof Error
@@ -146,12 +148,12 @@ function VerifyEmailView() {
             <h1 className="text-lg font-semibold" data-testid="verify-success-heading">
               Email verified
             </h1>
-            <p className="text-sm text-[var(--text-muted)]">{message}</p>
+            <p className="text-sm text-[var(--text-muted)]">Taking you to your dashboard...</p>
             <Link
-              href="/login"
+              href="/today"
               className="min-h-[44px] w-full inline-flex items-center justify-center rounded-xl bg-emerald-500 hover:bg-emerald-400 text-zinc-950 font-semibold text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-300 transition"
             >
-              Continue to sign in
+              Continue to today
             </Link>
           </>
         )}

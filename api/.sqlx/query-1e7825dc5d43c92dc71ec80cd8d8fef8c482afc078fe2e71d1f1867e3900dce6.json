@@ -1,0 +1,119 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO users (email, password_hash, full_name, timezone, role, email_verified_at)\n        VALUES ($1, $2, $3, 'UTC', $4, now())\n        ON CONFLICT DO NOTHING\n        RETURNING id, email, password_hash, full_name, avatar_url, timezone, coin_balance,\n                  email_verified_at, role as \"role: UserRole\", is_premium, premium_until,\n                  created_at, updated_at\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "email",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 2,
+        "name": "password_hash",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 3,
+        "name": "full_name",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 4,
+        "name": "avatar_url",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "timezone",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 6,
+        "name": "coin_balance",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 7,
+        "name": "email_verified_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 8,
+        "name": "role: UserRole",
+        "type_info": {
+          "Custom": {
+            "name": "user_role",
+            "kind": {
+              "Enum": [
+                "user",
+                "subadmin",
+                "admin"
+              ]
+            }
+          }
+        }
+      },
+      {
+        "ordinal": 9,
+        "name": "is_premium",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 10,
+        "name": "premium_until",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 11,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 12,
+        "name": "updated_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Varchar",
+        "Varchar",
+        "Varchar",
+        {
+          "Custom": {
+            "name": "user_role",
+            "kind": {
+              "Enum": [
+                "user",
+                "subadmin",
+                "admin"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "nullable": [
+      false,
+      true,
+      true,
+      true,
+      true,
+      false,
+      false,
+      true,
+      false,
+      false,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "1e7825dc5d43c92dc71ec80cd8d8fef8c482afc078fe2e71d1f1867e3900dce6"
+}
