@@ -29,7 +29,7 @@ impl RateLimiter {
         entries.retain(|&t| now.duration_since(t) < window);
 
         if entries.len() >= max_attempts {
-            return Err(ApiError::BadRequest(
+            return Err(ApiError::TooManyRequests(
                 "Too many requests. Please wait a moment before trying again.".into(),
             ));
         }

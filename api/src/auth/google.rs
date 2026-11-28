@@ -22,7 +22,7 @@ pub struct JwksResponse {
     pub keys: Vec<JwkKey>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GoogleIdTokenPayload {
     pub iss: String,
     pub aud: String,
@@ -48,14 +48,20 @@ type KeyCache = Option<(std::time::Instant, Vec<JwkKey>)>;
 #[derive(Clone)]
 pub struct GoogleVerifier {
     client_id: String,
+    jwks_url: String,
     http_client: Client,
     keys_cache: Arc<RwLock<KeyCache>>,
 }
 
 impl GoogleVerifier {
     pub fn new(client_id: String) -> Self {
+        Self::with_jwks_url(client_id, None)
+    }
+
+    pub fn with_jwks_url(client_id: String, jwks_url: Option<String>) -> Self {
         Self {
             client_id,
+            jwks_url: jwks_url.unwrap_or_else(|| GOOGLE_CERTS_URL.to_string()),
             http_client: Client::builder().build().unwrap_or_default(),
             keys_cache: Arc::new(RwLock::new(None)),
         }
@@ -80,7 +86,7 @@ impl GoogleVerifier {
     async fn refresh_keys(&self) -> Result<Vec<JwkKey>, ApiError> {
         let res = self
             .http_client
-            .get(GOOGLE_CERTS_URL)
+            .get(&self.jwks_url)
             .send()
             .await
             .map_err(|e| ApiError::Internal(format!("Failed to fetch Google JWKS: {}", e)))?;

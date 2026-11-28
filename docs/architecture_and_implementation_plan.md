@@ -64,7 +64,8 @@ onedegree/
 │   │   ├── 20261112000003_create_todos.sql
 │   │   ├── 20261112000004_create_coins_and_rewards.sql
 │   │   ├── 20261112000005_create_trigger_logs.sql
-│   │   └── 20261113000001_add_auth_roles_durations_and_tokens.sql
+│   │   ├── 20261113000001_add_auth_roles_durations_and_tokens.sql
+│   │   └── 20261128000001_create_pending_registrations.sql
 │   └── src/
 │       ├── lib.rs                 # Library exports & router assembly
 │       ├── main.rs                # Entrypoint, database connection & migrations
@@ -231,13 +232,16 @@ onedegree/
 1. **Authentication (Google & Email/Password)**:
    - Passwords hashed with **Argon2id** (minimum 8 characters).
    - Email is lowercased across all registration and login queries.
-   - If an email already belongs to a Google account, registration/login rejects with `"This email is registered with Google. Please sign in with Google."`
-   - Same error message for wrong email and wrong password (`"Invalid email or password"`).
+   - If an email already belongs to an account, `POST /v1/auth/register` returns the generic `201` response without storing an unverified `users` row and dispatches a rate-limited existing-account notice email; unverified sign-ups live only in `pending_registrations` until verified.
+   - Same error message for wrong email and wrong password (`"Invalid email or password"`, HTTP `401`), with dummy Argon2 timing parity when an account does not exist.
+   - **Verified Email Requirement**: `POST /v1/auth/login` requires verified email. A valid email/password for an active unverified sign-up in `pending_registrations` returns HTTP `403` with error code `EMAIL_NOT_VERIFIED`, issues no tokens, and sets no cookie. Google sign-ins count as verified when Google's `email_verified` claim is `true` (and clear any matching `pending_registrations` row).
    - Password hashes are **never logged or returned** in any API response.
-   - Login and registration requests are **rate limited** via in-memory sliding window limiter.
-2. **Email Verification & Password Reset**:
-   - Verification and reset tokens are cryptographically random, stored hashed (SHA-256), single-use (`used_at`), with explicit expiration.
-   - Mailer trait abstracts email delivery; ConsoleMailer logs links for local development.
+   - Login, registration, and verification-resend requests are **rate limited** via in-memory sliding window limiter.
+2. **Email Verification, Resend & Password Reset**:
+   - Unverified sign-ups store their password hash and SHA-256 token hash (`token_hash`) in `pending_registrations` with explicit expiration (24h verification, 60s resend cooldown, 24h `send_count` cap of 5, and `failed_attempts` lockout after 5 wrong passwords).
+   - `POST /v1/auth/verify-email` requires `{ token, password }` and atomically verifies the sign-up password, creates the verified `users` row, and deletes the pending registration so passive link scanners or wrong-password callers never activate an account.
+   - `POST /v1/auth/resend-verification` always returns a generic `200 OK` whether or not a pending sign-up exists, enforces per-IP and per-email rate limits plus a 60-second per-email cooldown and 24h cap of 5, and rotates `token_hash` cleanly.
+   - `MAILER` selects `console` (default for `development`/`local`/`test`, used by `make dev`), `file` (`local`/`test` only, writing JSONL to `/tmp/onedegree-mail-outbox.jsonl` with mode `0600`), or `resend` (`resend-rs`, also enabled in local dev via `make dev-mail`). Missing or unknown `APP_ENV` fails closed as `production`, refusing `console`/`file` and requiring `resend` + HTTPS `WEB_BASE_URL`.
 3. **Role & Admin Privileges**:
    - `ADMIN_EMAILS` read from environment (e.g. `sohelhussaing@gmail.com`).
    - A user is granted `role = 'admin'` **only upon verified email** (Google `email_verified == true` or confirmed password email verification token).
@@ -264,8 +268,9 @@ onedegree/
 |---|---|---|---|
 | `POST` | `/v1/auth/google` | Verify Google ID token, link identity, issue tokens | No |
 | `POST` | `/v1/auth/register` | Register with email & password (Argon2id, min 8 chars, rate-limited) | No |
-| `POST` | `/v1/auth/login` | Login with email & password (rate-limited, single error message) | No |
-| `POST` | `/v1/auth/verify-email` | Verify email token (single-use; promotes verified admin emails) | No |
+| `POST` | `/v1/auth/login` | Login with email & password (rate-limited, requires verified email or 403 `EMAIL_NOT_VERIFIED`) | No |
+| `POST` | `/v1/auth/verify-email` | Verify `{ token, password }` to create verified user & clear pending row | No |
+| `POST` | `/v1/auth/resend-verification` | Resend verification link (generic 200, 60s cooldown, invalidates old tokens) | No |
 | `POST` | `/v1/auth/forgot-password` | Dispatch password reset token email via Mailer | No |
 | `POST` | `/v1/auth/reset-password` | Reset password using single-use token & revoke sessions | No |
 | `POST` | `/v1/auth/refresh` | Rotate refresh token (httpOnly cookie, replay defense) | No |

@@ -1,4 +1,4 @@
-.PHONY: help db-up db-down db-logs dev-api dev-api-neon dev-web build check clean
+.PHONY: help db-up db-down db-logs dev dev-mail dev-api dev-api-neon dev-web stop build check clean
 
 # Default target
 help:
@@ -8,9 +8,12 @@ help:
 	@echo "  make db-up         Start PostgreSQL 16 container via Docker Compose"
 	@echo "  make db-down       Stop PostgreSQL container"
 	@echo "  make db-logs       View live PostgreSQL container logs"
+	@echo "  make dev           Start both API and Web servers (console mailer)"
+	@echo "  make dev-mail      Start API (MAILER=resend) and Web servers for real emails"
+	@echo "  make stop          Stop both API and Web servers"
 	@echo "  make dev-api       Run Rust Axum API with local Docker PostgreSQL"
 	@echo "  make dev-api-neon  Run Rust Axum API with Neon PostgreSQL"
-	@echo "  make dev-web       Run Next.js 15 Web App (http://localhost:3000)"
+	@echo "  make dev-web       Run Next.js 16 Web App (http://localhost:3000)"
 	@echo "  make check         Verify compilation of both api and web"
 	@echo "  make build         Build release artifacts for both api and web"
 	@echo "  make clean         Remove target and node_modules artifacts"
@@ -27,6 +30,93 @@ db-logs:
 	docker compose logs -f postgres
 
 # Development Commands
+dev: db-up
+	@echo "Starting 1degree API (port 8080) and Web (port 3000)..."
+	@echo "✓ API  → http://localhost:8080"
+	@echo "✓ Web  → http://localhost:3000"
+	@echo "✓ Docs → http://localhost:8080/v1/swagger-ui/"
+	@echo "Press Ctrl+C or run 'make stop' to stop both servers."
+	@set -m; \
+	api_pid=""; web_pid=""; \
+	cleanup() { \
+		trap - INT TERM; \
+		echo ""; \
+		echo "Stopping API and Web servers..."; \
+		if [ -n "$$api_pid" ]; then kill -TERM -$$api_pid 2>/dev/null || kill -TERM $$api_pid 2>/dev/null || true; fi; \
+		if [ -n "$$web_pid" ]; then kill -TERM -$$web_pid 2>/dev/null || kill -TERM $$web_pid 2>/dev/null || true; fi; \
+		wait 2>/dev/null || true; \
+		exit 0; \
+	}; \
+	trap cleanup INT TERM; \
+	(cd api && exec cargo run) & \
+	api_pid=$$!; \
+	(cd web && exec pnpm dev) & \
+	web_pid=$$!; \
+	wait
+
+dev-mail: db-up
+	@set -e; \
+	if [ ! -f api/.env ]; then \
+		echo "Error: api/.env not found. Copy api/.env.example to api/.env and configure RESEND_API_KEY and MAIL_FROM."; \
+		exit 1; \
+	fi; \
+	resend_key=$$(grep -E '^RESEND_API_KEY=' api/.env | tail -n1 | cut -d'=' -f2- | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$$//;s/^"//;s/"$$//;s/^'"'"'//;s/'"'"'$$//'); \
+	mail_from=$$(grep -E '^MAIL_FROM=' api/.env | tail -n1 | cut -d'=' -f2- | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$$//;s/^"//;s/"$$//;s/^'"'"'//;s/'"'"'$$//'); \
+	if [ -z "$$resend_key" ] || [ -z "$$mail_from" ]; then \
+		echo "Error: RESEND_API_KEY and MAIL_FROM must both be non-empty in api/.env to run make dev-mail."; \
+		exit 1; \
+	fi
+	@echo "Starting 1degree API with Resend mailer (port 8080) and Web (port 3000)..."
+	@echo "Resend test mode: emails only reach the Resend account address until a domain is verified."
+	@echo "✓ API  → http://localhost:8080"
+	@echo "✓ Web  → http://localhost:3000"
+	@echo "✓ Docs → http://localhost:8080/v1/swagger-ui/"
+	@echo "Press Ctrl+C or run 'make stop' to stop both servers."
+	@set -m; \
+	api_pid=""; web_pid=""; \
+	cleanup() { \
+		trap - INT TERM; \
+		echo ""; \
+		echo "Stopping API and Web servers..."; \
+		if [ -n "$$api_pid" ]; then kill -TERM -$$api_pid 2>/dev/null || kill -TERM $$api_pid 2>/dev/null || true; fi; \
+		if [ -n "$$web_pid" ]; then kill -TERM -$$web_pid 2>/dev/null || kill -TERM $$web_pid 2>/dev/null || true; fi; \
+		wait 2>/dev/null || true; \
+		exit 0; \
+	}; \
+	trap cleanup INT TERM; \
+	(cd api && MAILER=resend exec cargo run) & \
+	api_pid=$$!; \
+	(cd web && exec pnpm dev) & \
+	web_pid=$$!; \
+	wait
+
+stop:
+	@stopped=""; \
+	for port in 8080 3000; do \
+		pids=$$(lsof -ti tcp:$$port -sTCP:LISTEN 2>/dev/null || true); \
+		if [ -n "$$pids" ]; then \
+			echo "Stopping listener on port $$port..."; \
+			kill $$pids 2>/dev/null || true; \
+			waited=0; \
+			while [ $$waited -lt 15 ]; do \
+				rem=$$(lsof -ti tcp:$$port -sTCP:LISTEN 2>/dev/null || true); \
+				if [ -z "$$rem" ]; then break; fi; \
+				sleep 0.2; \
+				waited=$$((waited + 1)); \
+			done; \
+			rem=$$(lsof -ti tcp:$$port -sTCP:LISTEN 2>/dev/null || true); \
+			if [ -n "$$rem" ]; then \
+				echo "Listener on port $$port still active after 3s; sending SIGKILL..."; \
+				kill -9 $$rem 2>/dev/null || true; \
+			fi; \
+			echo "✓ Stopped server on port $$port."; \
+			stopped="$$stopped $$port"; \
+		fi; \
+	done; \
+	if [ -z "$$stopped" ]; then \
+		echo "No listeners running on ports 8080 or 3000."; \
+	fi
+
 dev-api:
 	cd api && cargo run
 

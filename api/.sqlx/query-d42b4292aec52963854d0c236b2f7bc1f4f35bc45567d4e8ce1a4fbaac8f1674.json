@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE pending_registrations\n            SET failed_attempts = $2,\n                token_hash = CASE WHEN $2 >= 5 THEN NULL ELSE token_hash END\n            WHERE id = $1\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "d42b4292aec52963854d0c236b2f7bc1f4f35bc45567d4e8ce1a4fbaac8f1674"
+}

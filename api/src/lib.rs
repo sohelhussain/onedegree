@@ -64,6 +64,7 @@ impl Modify for SecurityAddon {
         routes::auth::register,
         routes::auth::login,
         routes::auth::verify_email,
+        routes::auth::resend_verification,
         routes::auth::forgot_password,
         routes::auth::reset_password,
         routes::auth::refresh_token,
@@ -84,6 +85,7 @@ impl Modify for SecurityAddon {
             routes::auth::RegisterRequest,
             routes::auth::LoginRequest,
             routes::auth::VerifyEmailRequest,
+            routes::auth::ResendVerificationRequest,
             routes::auth::ForgotPasswordRequest,
             routes::auth::ResetPasswordRequest,
             routes::auth::RefreshRequest,
@@ -150,6 +152,10 @@ pub fn create_router(app_state: Arc<AppState>) -> Router {
         .route("/v1/auth/register", post(routes::auth::register))
         .route("/v1/auth/login", post(routes::auth::login))
         .route("/v1/auth/verify-email", post(routes::auth::verify_email))
+        .route(
+            "/v1/auth/resend-verification",
+            post(routes::auth::resend_verification),
+        )
         .route(
             "/v1/auth/forgot-password",
             post(routes::auth::forgot_password),

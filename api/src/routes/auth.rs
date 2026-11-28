@@ -1,6 +1,6 @@
 use axum::{
     Json,
-    extract::Extension,
+    extract::{ConnectInfo, Extension},
     http::{
         HeaderMap, StatusCode,
         header::{COOKIE, ORIGIN, SET_COOKIE},
@@ -9,6 +9,7 @@ use axum::{
 };
 use chrono::{Duration, Utc};
 use serde::Deserialize;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use utoipa::ToSchema;
 
@@ -40,6 +41,12 @@ pub struct LoginRequest {
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct VerifyEmailRequest {
     pub token: String,
+    pub password: String,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct ResendVerificationRequest {
+    pub email: String,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -72,13 +79,63 @@ fn verify_csrf_origin(headers: &HeaderMap, allowed_origin: &str) -> Result<(), A
     Ok(())
 }
 
-fn get_client_ip(headers: &HeaderMap) -> String {
-    headers
-        .get("x-forwarded-for")
-        .and_then(|h| h.to_str().ok())
-        .and_then(|s| s.split(',').next())
-        .map(|s| s.trim().to_string())
+const MAX_EMAIL_CHARS: usize = 254;
+const MAX_EMAIL_LOCAL_CHARS: usize = 64;
+const MAX_NAME_CHARS: usize = 100;
+
+fn get_client_ip(connect_info: Option<Extension<ConnectInfo<SocketAddr>>>) -> String {
+    // Do not trust spoofable X-Forwarded-For headers from direct peers.
+    connect_info
+        .map(|Extension(ConnectInfo(addr))| addr.ip().to_string())
         .unwrap_or_else(|| "127.0.0.1".to_string())
+}
+
+fn validate_and_normalize_email(raw: &str) -> Result<String, ApiError> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed.len() > MAX_EMAIL_CHARS {
+        return Err(ApiError::BadRequest("Invalid email address".into()));
+    }
+    if !trimmed.is_ascii() || trimmed.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return Err(ApiError::BadRequest("Invalid email address".into()));
+    }
+    let Some((local, domain)) = trimmed.split_once('@') else {
+        return Err(ApiError::BadRequest("Invalid email address".into()));
+    };
+    if local.is_empty()
+        || local.len() > MAX_EMAIL_LOCAL_CHARS
+        || domain.is_empty()
+        || domain.contains('@')
+        || !domain.contains('.')
+        || domain.starts_with('.')
+        || domain.ends_with('.')
+        || domain.contains("..")
+        || domain.split('.').any(str::is_empty)
+    {
+        return Err(ApiError::BadRequest("Invalid email address".into()));
+    }
+    Ok(trimmed.to_ascii_lowercase())
+}
+
+fn validate_and_normalize_name(raw: Option<String>) -> Result<Option<String>, ApiError> {
+    let Some(name) = raw else {
+        return Ok(None);
+    };
+    if name.chars().any(|c| c.is_control()) {
+        return Err(ApiError::BadRequest(
+            "Name contains invalid control characters".into(),
+        ));
+    }
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    if trimmed.chars().count() > MAX_NAME_CHARS {
+        return Err(ApiError::BadRequest(format!(
+            "Name must be {} characters or fewer",
+            MAX_NAME_CHARS
+        )));
+    }
+    Ok(Some(trimmed.to_string()))
 }
 
 fn extract_refresh_token(headers: &HeaderMap, body: &RefreshRequest) -> Option<String> {
@@ -153,18 +210,30 @@ pub async fn google_auth(
 
     let user = match existing_user_id {
         Some(uid) => {
-            // If user's email is verified by Google and matches ADMIN_EMAILS, update role to admin if not already
-            if initial_role == UserRole::Admin {
-                sqlx::query!(
-                    r#"
-                    UPDATE users
-                    SET role = 'admin', email_verified_at = COALESCE(email_verified_at, now())
-                    WHERE id = $1
-                    "#,
-                    uid
-                )
-                .execute(&mut *tx)
-                .await?;
+            if claims.email_verified.unwrap_or(false) {
+                if initial_role == UserRole::Admin {
+                    sqlx::query!(
+                        r#"
+                        UPDATE users
+                        SET role = 'admin', email_verified_at = COALESCE(email_verified_at, now())
+                        WHERE id = $1
+                        "#,
+                        uid
+                    )
+                    .execute(&mut *tx)
+                    .await?;
+                } else {
+                    sqlx::query!(
+                        r#"
+                        UPDATE users
+                        SET email_verified_at = COALESCE(email_verified_at, now())
+                        WHERE id = $1 AND email_verified_at IS NULL
+                        "#,
+                        uid
+                    )
+                    .execute(&mut *tx)
+                    .await?;
+                }
             }
 
             sqlx::query_as!(
@@ -232,6 +301,13 @@ pub async fn google_auth(
     let expires_at =
         Utc::now() + chrono::Duration::seconds(state.config.jwt_refresh_expiration_secs);
 
+    if let Some(ref em) = user.email {
+        let lower = em.trim().to_ascii_lowercase();
+        sqlx::query!("DELETE FROM pending_registrations WHERE email = $1", lower)
+            .execute(&mut *tx)
+            .await?;
+    }
+
     sqlx::query!(
         r#"
         INSERT INTO refresh_tokens (user_id, token_hash, expires_at)
@@ -265,18 +341,18 @@ pub async fn google_auth(
     path = "/v1/auth/register",
     request_body = RegisterRequest,
     responses(
-        (status = 201, description = "Registration successful; check email for verification"),
-        (status = 400, description = "Validation error or email already in use")
+        (status = 201, description = "Generic registration confirmation"),
+        (status = 400, description = "Validation error")
     ),
     tag = "Auth"
 )]
 pub async fn register(
     Extension(state): Extension<Arc<AppState>>,
-    headers: HeaderMap,
+    connect_info: Option<Extension<ConnectInfo<SocketAddr>>>,
     Json(payload): Json<RegisterRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
-    // 1. Rate limiting
-    let ip = get_client_ip(&headers);
+    // 1. Rate limiting (peer socket IP; ignores spoofed X-Forwarded-For)
+    let ip = get_client_ip(connect_info);
     state
         .rate_limiter
         .check(
@@ -286,96 +362,143 @@ pub async fn register(
         )
         .await?;
 
-    // 2. Validate password length (minimum 8 characters)
-    if payload.password.len() < 8 {
-        return Err(ApiError::BadRequest(
-            "Password must be at least 8 characters long".into(),
-        ));
-    }
+    // 2. Validate email, name, and password length BEFORE Argon2 hashing
+    let email = validate_and_normalize_email(&payload.email)?;
+    let full_name = validate_and_normalize_name(payload.full_name)?;
+    password::validate_password_length(&payload.password)?;
 
-    let email = payload.email.trim().to_lowercase();
-    if email.is_empty() || !email.contains('@') {
-        return Err(ApiError::BadRequest("Invalid email address".into()));
-    }
+    // 3. Opportunistic cleanup of expired pending registrations (indexed by expires_at)
+    let _ = sqlx::query!("DELETE FROM pending_registrations WHERE expires_at <= now()")
+        .execute(&state.pool)
+        .await;
 
-    // 3. Reject if email belongs to an existing Google account
-    let google_account = sqlx::query!(
-        r#"
-        SELECT u.id 
-        FROM users u
-        JOIN auth_identities ai ON ai.user_id = u.id
-        WHERE LOWER(u.email) = $1 AND ai.provider = 'google'
-        "#,
-        email
-    )
-    .fetch_optional(&state.pool)
-    .await?;
+    // 4. Hash password upfront (also provides Argon2 timing parity on existing-account path)
+    let password_hash = password::hash_password(&payload.password)?;
 
-    if google_account.is_some() {
-        return Err(ApiError::BadRequest(
-            "This email is registered with Google. Please sign in with Google.".into(),
-        ));
-    }
+    let generic_response = (
+        StatusCode::CREATED,
+        Json(serde_json::json!({
+            "message": "If this address can be used, we sent a verification link. It expires in 24 hours. Already have an account? Sign in or reset your password."
+        })),
+    );
 
-    // 4. Reject if email belongs to an existing password account
+    // 5. If any existing user (password or Google) already owns this email, create nothing and send notice (rate-limited)
     let existing_user = sqlx::query!("SELECT id FROM users WHERE LOWER(email) = $1", email)
         .fetch_optional(&state.pool)
         .await?;
 
     if existing_user.is_some() {
-        return Err(ApiError::BadRequest("Email is already registered".into()));
+        let _ = sqlx::query!("DELETE FROM pending_registrations WHERE email = $1", email)
+            .execute(&state.pool)
+            .await;
+
+        let cooldown_ok = state
+            .rate_limiter
+            .check(
+                &format!("existing_notice:cooldown:{}", email),
+                1,
+                std::time::Duration::from_secs(60),
+            )
+            .await
+            .is_ok();
+        let daily_ok = state
+            .rate_limiter
+            .check(
+                &format!("existing_notice:day:{}", email),
+                5,
+                std::time::Duration::from_secs(86_400),
+            )
+            .await
+            .is_ok();
+
+        if cooldown_ok && daily_ok {
+            if let Err(err) = state.mailer.send_existing_account_notice(&email).await {
+                tracing::error!(
+                    "Failed to dispatch existing-account notice during registration: {}",
+                    err
+                );
+            }
+        }
+
+        return Ok(generic_response);
     }
 
-    // 5. Hash password with Argon2id (never logged or returned)
-    let password_hash = password::hash_password(&payload.password)?;
-
+    // 6. Upsert pending_registrations with 60s cooldown and 5 sends/day cap (reset after 24h)
     let mut tx = state.pool.begin().await?;
-
-    // 6. Insert user (role is always 'user' at registration; unverified email cannot be admin)
-    let user_id = sqlx::query_scalar!(
+    let existing_pending = sqlx::query!(
         r#"
-        INSERT INTO users (email, password_hash, full_name, timezone, role)
-        VALUES ($1, $2, $3, 'UTC', 'user')
-        RETURNING id
+        SELECT id, last_sent_at, send_count
+        FROM pending_registrations
+        WHERE email = $1
+        FOR UPDATE
         "#,
-        email,
-        password_hash,
-        payload.full_name
+        email
     )
-    .fetch_one(&mut *tx)
+    .fetch_optional(&mut *tx)
     .await?;
 
-    // 7. Generate email verification token (random, stored hashed, single-use, 24h expiry)
+    let next_send_count = if let Some(pending) = existing_pending {
+        let elapsed = Utc::now().signed_duration_since(pending.last_sent_at);
+        if elapsed < Duration::seconds(60) {
+            tx.rollback().await?;
+            return Ok(generic_response);
+        }
+        let count = if elapsed >= Duration::hours(24) {
+            1
+        } else {
+            pending.send_count + 1
+        };
+        if count > 5 {
+            tx.rollback().await?;
+            return Ok(generic_response);
+        }
+        count
+    } else {
+        1
+    };
+
     let raw_token = jwt::generate_refresh_token();
     let token_hash = jwt::hash_refresh_token(&raw_token);
     let expires_at = Utc::now() + Duration::hours(24);
 
     sqlx::query!(
         r#"
-        INSERT INTO email_verification_tokens (user_id, token_hash, expires_at)
-        VALUES ($1, $2, $3)
+        INSERT INTO pending_registrations
+            (email, full_name, password_hash, token_hash, expires_at, last_sent_at, send_count, failed_attempts)
+        VALUES ($1, $2, $3, $4, $5, now(), $6, 0)
+        ON CONFLICT (email) DO UPDATE SET
+            full_name = EXCLUDED.full_name,
+            password_hash = EXCLUDED.password_hash,
+            token_hash = EXCLUDED.token_hash,
+            expires_at = EXCLUDED.expires_at,
+            last_sent_at = now(),
+            send_count = EXCLUDED.send_count,
+            failed_attempts = 0
         "#,
-        user_id,
+        email,
+        full_name,
+        password_hash,
         token_hash,
-        expires_at
+        expires_at,
+        next_send_count
     )
     .execute(&mut *tx)
     .await?;
 
     tx.commit().await?;
 
-    // 8. Dispatch email via mailer
-    let _ = state
+    if let Err(err) = state
         .mailer
         .send_verification_email(&email, &raw_token)
-        .await;
+        .await
+    {
+        tracing::error!(
+            "Failed to dispatch verification email during registration: {}",
+            err
+        );
+    }
 
-    Ok((
-        StatusCode::CREATED,
-        Json(serde_json::json!({
-            "message": "Registration successful. Please verify your email to activate your account."
-        })),
-    ))
+    Ok(generic_response)
 }
 
 #[utoipa::path(
@@ -390,11 +513,11 @@ pub async fn register(
 )]
 pub async fn login(
     Extension(state): Extension<Arc<AppState>>,
-    headers: HeaderMap,
+    connect_info: Option<Extension<ConnectInfo<SocketAddr>>>,
     Json(payload): Json<LoginRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
-    // 1. Rate limiting
-    let ip = get_client_ip(&headers);
+    // 1. Rate limiting (peer socket IP; ignores spoofed X-Forwarded-For)
+    let ip = get_client_ip(connect_info);
     state
         .rate_limiter
         .check(
@@ -404,6 +527,12 @@ pub async fn login(
         )
         .await?;
 
+    // Reject oversized/control inputs BEFORE touching DB or Argon2id
+    if payload.email.trim().len() > MAX_EMAIL_CHARS
+        || password::validate_password_length(&payload.password).is_err()
+    {
+        return Err(ApiError::Unauthorized("Invalid email or password".into()));
+    }
     let email = payload.email.trim().to_lowercase();
 
     // 2. Query user by lowercase email
@@ -424,7 +553,23 @@ pub async fn login(
     let user = match user {
         Some(u) => u,
         None => {
-            // Same error message for wrong email and wrong password
+            // Check pending_registrations before falling back cleanly with dummy Argon2 timing parity
+            let pending = sqlx::query!(
+                "SELECT password_hash FROM pending_registrations WHERE email = $1 AND expires_at > now()",
+                email
+            )
+            .fetch_optional(&state.pool)
+            .await?;
+
+            if let Some(p) = pending {
+                if password::verify_password(&payload.password, &p.password_hash)? {
+                    return Err(ApiError::EmailNotVerified(
+                        "Please verify your email before signing in.".into(),
+                    ));
+                }
+            } else {
+                password::verify_dummy_password(&payload.password);
+            }
             return Err(ApiError::Unauthorized("Invalid email or password".into()));
         }
     };
@@ -446,6 +591,7 @@ pub async fn login(
                 ));
             }
 
+            password::verify_dummy_password(&payload.password);
             return Err(ApiError::Unauthorized("Invalid email or password".into()));
         }
     };
@@ -456,7 +602,14 @@ pub async fn login(
         return Err(ApiError::Unauthorized("Invalid email or password".into()));
     }
 
-    // 4. Issue 15-minute access token and rotating refresh token
+    // 4. Reject verified-required password login if email is not verified
+    if user.email_verified_at.is_none() {
+        return Err(ApiError::EmailNotVerified(
+            "Please verify your email before signing in.".into(),
+        ));
+    }
+
+    // 5. Issue 15-minute access token and rotating refresh token
     let access_token = jwt::create_access_token(
         user.id,
         state.config.jwt_secret.as_bytes(),
@@ -498,8 +651,8 @@ pub async fn login(
     path = "/v1/auth/verify-email",
     request_body = VerifyEmailRequest,
     responses(
-        (status = 200, description = "Email verified successfully"),
-        (status = 400, description = "Invalid or expired token")
+        (status = 200, description = "Email verified and account created"),
+        (status = 400, description = "Invalid token, expired token, or password mismatch")
     ),
     tag = "Auth"
 )]
@@ -507,14 +660,24 @@ pub async fn verify_email(
     Extension(state): Extension<Arc<AppState>>,
     Json(payload): Json<VerifyEmailRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let token_hash = jwt::hash_refresh_token(&payload.token);
+    if payload.token.trim().is_empty() || payload.password.is_empty() {
+        return Err(ApiError::BadRequest(
+            "Verification token and password are required.".into(),
+        ));
+    }
+    if payload.password.len() > 512 {
+        return Err(ApiError::BadRequest(
+            "Invalid verification token or password.".into(),
+        ));
+    }
 
+    let token_hash = jwt::hash_refresh_token(payload.token.trim());
     let mut tx = state.pool.begin().await?;
 
-    let record = sqlx::query!(
+    let pending = sqlx::query!(
         r#"
-        SELECT id, user_id, expires_at, used_at
-        FROM email_verification_tokens
+        SELECT id, email, full_name, password_hash, expires_at, failed_attempts
+        FROM pending_registrations
         WHERE token_hash = $1
         FOR UPDATE
         "#,
@@ -523,60 +686,222 @@ pub async fn verify_email(
     .fetch_optional(&mut *tx)
     .await?;
 
-    let record = match record {
-        Some(r) => r,
-        None => {
-            return Err(ApiError::BadRequest(
-                "Invalid or expired verification token".into(),
-            ));
-        }
+    let Some(pending) = pending else {
+        return Err(ApiError::BadRequest(
+            "Invalid or expired verification token".into(),
+        ));
     };
 
-    if record.used_at.is_some() || record.expires_at < Utc::now() {
+    if pending.failed_attempts >= 5 || pending.expires_at < Utc::now() {
         return Err(ApiError::BadRequest(
             "Invalid or expired verification token".into(),
         ));
     }
 
-    // Mark token used (single-use)
-    sqlx::query!(
-        "UPDATE email_verification_tokens SET used_at = now() WHERE id = $1",
-        record.id
-    )
-    .execute(&mut *tx)
-    .await?;
+    let password_matches = password::verify_password(&payload.password, &pending.password_hash)?;
+    if !password_matches {
+        let next_attempts = pending.failed_attempts + 1;
+        sqlx::query!(
+            r#"
+            UPDATE pending_registrations
+            SET failed_attempts = $2,
+                token_hash = CASE WHEN $2 >= 5 THEN NULL ELSE token_hash END
+            WHERE id = $1
+            "#,
+            pending.id,
+            next_attempts
+        )
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
 
-    // Mark email verified
-    sqlx::query!(
-        "UPDATE users SET email_verified_at = now() WHERE id = $1",
-        record.user_id
-    )
-    .execute(&mut *tx)
-    .await?;
-
-    // Check if user's verified email is in ADMIN_EMAILS
-    let user_email: Option<String> =
-        sqlx::query_scalar!("SELECT email FROM users WHERE id = $1", record.user_id)
-            .fetch_one(&mut *tx)
-            .await?;
-
-    if let Some(em) = user_email {
-        let lower = em.trim().to_lowercase();
-        if state.config.admin_emails.contains(&lower) {
-            sqlx::query!(
-                "UPDATE users SET role = 'admin' WHERE id = $1",
-                record.user_id
-            )
-            .execute(&mut *tx)
-            .await?;
+        if next_attempts >= 5 {
+            return Err(ApiError::BadRequest(
+                "Too many incorrect password attempts. This link is no longer valid; please request a new verification email.".into(),
+            ));
         }
+        return Err(ApiError::BadRequest(
+            "Incorrect password for this registration link.".into(),
+        ));
+    }
+
+    let email_lower = pending.email.trim().to_ascii_lowercase();
+    let existing_user = sqlx::query!(
+        "SELECT id FROM users WHERE LOWER(email) = $1 FOR UPDATE",
+        email_lower
+    )
+    .fetch_optional(&mut *tx)
+    .await?;
+
+    if existing_user.is_some() {
+        sqlx::query!(
+            "DELETE FROM pending_registrations WHERE id = $1",
+            pending.id
+        )
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        return Err(ApiError::BadRequest(
+            "An account with this email already exists. Please sign in.".into(),
+        ));
+    }
+
+    let initial_role = if state.config.admin_emails.contains(&email_lower) {
+        UserRole::Admin
+    } else {
+        UserRole::User
+    };
+
+    let insert_result = sqlx::query!(
+        r#"
+        INSERT INTO users (email, password_hash, full_name, timezone, role, email_verified_at)
+        VALUES ($1, $2, $3, 'UTC', $4, now())
+        ON CONFLICT DO NOTHING
+        RETURNING id
+        "#,
+        email_lower,
+        pending.password_hash,
+        pending.full_name,
+        initial_role as UserRole
+    )
+    .fetch_optional(&mut *tx)
+    .await?;
+
+    sqlx::query!(
+        "DELETE FROM pending_registrations WHERE id = $1",
+        pending.id
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    if insert_result.is_none() {
+        tx.commit().await?;
+        return Err(ApiError::BadRequest(
+            "An account with this email already exists. Please sign in.".into(),
+        ));
     }
 
     tx.commit().await?;
 
     Ok(Json(serde_json::json!({
-        "message": "Email verified successfully. You may now access all account features."
+        "message": "Email verified successfully. You may now sign in."
     })))
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/auth/resend-verification",
+    request_body = ResendVerificationRequest,
+    responses(
+        (status = 200, description = "Generic confirmation regardless of account existence"),
+        (status = 429, description = "Rate limit exceeded")
+    ),
+    tag = "Auth"
+)]
+pub async fn resend_verification(
+    Extension(state): Extension<Arc<AppState>>,
+    connect_info: Option<Extension<ConnectInfo<SocketAddr>>>,
+    Json(payload): Json<ResendVerificationRequest>,
+) -> Result<impl IntoResponse, ApiError> {
+    let ip = get_client_ip(connect_info);
+    state
+        .rate_limiter
+        .check(
+            &format!("resend_verification:ip:{}", ip),
+            10,
+            std::time::Duration::from_secs(60),
+        )
+        .await?;
+
+    let email = validate_and_normalize_email(&payload.email)?;
+
+    state
+        .rate_limiter
+        .check(
+            &format!("resend_verification:email:{}", email),
+            5,
+            std::time::Duration::from_secs(900),
+        )
+        .await?;
+
+    let generic_response = Json(serde_json::json!({
+        "message": "If a pending registration exists for this email, a verification link has been sent."
+    }));
+
+    let user_exists = sqlx::query!("SELECT id FROM users WHERE LOWER(email) = $1", email)
+        .fetch_optional(&state.pool)
+        .await?;
+    if user_exists.is_some() {
+        return Ok(generic_response);
+    }
+
+    let mut tx = state.pool.begin().await?;
+    let pending = sqlx::query!(
+        r#"
+        SELECT id, last_sent_at, send_count
+        FROM pending_registrations
+        WHERE email = $1 AND expires_at > now()
+        FOR UPDATE
+        "#,
+        email
+    )
+    .fetch_optional(&mut *tx)
+    .await?;
+
+    let Some(pending) = pending else {
+        tx.rollback().await?;
+        return Ok(generic_response);
+    };
+
+    let elapsed = Utc::now().signed_duration_since(pending.last_sent_at);
+    if elapsed < Duration::seconds(60) {
+        tx.rollback().await?;
+        return Ok(generic_response);
+    }
+
+    let next_send_count = if elapsed >= Duration::hours(24) {
+        1
+    } else {
+        pending.send_count + 1
+    };
+    if next_send_count > 5 {
+        tx.rollback().await?;
+        return Ok(generic_response);
+    }
+
+    let raw_token = jwt::generate_refresh_token();
+    let token_hash = jwt::hash_refresh_token(&raw_token);
+    let expires_at = Utc::now() + Duration::hours(24);
+
+    sqlx::query!(
+        r#"
+        UPDATE pending_registrations
+        SET token_hash = $2,
+            expires_at = $3,
+            last_sent_at = now(),
+            send_count = $4,
+            failed_attempts = 0
+        WHERE id = $1
+        "#,
+        pending.id,
+        token_hash,
+        expires_at,
+        next_send_count
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+
+    if let Err(err) = state
+        .mailer
+        .send_verification_email(&email, &raw_token)
+        .await
+    {
+        tracing::error!("Failed to dispatch verification email on resend: {}", err);
+    }
+
+    Ok(generic_response)
 }
 
 #[utoipa::path(
@@ -590,9 +915,29 @@ pub async fn verify_email(
 )]
 pub async fn forgot_password(
     Extension(state): Extension<Arc<AppState>>,
+    connect_info: Option<Extension<ConnectInfo<SocketAddr>>>,
     Json(payload): Json<ForgotPasswordRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let email = payload.email.trim().to_lowercase();
+    let ip = get_client_ip(connect_info);
+    state
+        .rate_limiter
+        .check(
+            &format!("forgot_password:ip:{}", ip),
+            20,
+            std::time::Duration::from_secs(60),
+        )
+        .await?;
+
+    let email = validate_and_normalize_email(&payload.email)?;
+
+    state
+        .rate_limiter
+        .check(
+            &format!("forgot_password:email:{}", email),
+            5,
+            std::time::Duration::from_secs(900),
+        )
+        .await?;
 
     let user = sqlx::query!(
         "SELECT id, password_hash FROM users WHERE LOWER(email) = $1",
@@ -607,6 +952,14 @@ pub async fn forgot_password(
             let token_hash = jwt::hash_refresh_token(&raw_token);
             let expires_at = Utc::now() + Duration::hours(1); // 1 hour expiry for reset
 
+            let mut tx = state.pool.begin().await?;
+            let _ = sqlx::query!(
+                "UPDATE password_reset_tokens SET used_at = now() WHERE user_id = $1 AND used_at IS NULL",
+                u.id
+            )
+            .execute(&mut *tx)
+            .await;
+
             let _ = sqlx::query!(
                 r#"
                 INSERT INTO password_reset_tokens (user_id, token_hash, expires_at)
@@ -616,13 +969,18 @@ pub async fn forgot_password(
                 token_hash,
                 expires_at
             )
-            .execute(&state.pool)
+            .execute(&mut *tx)
             .await;
 
-            let _ = state
+            let _ = tx.commit().await;
+
+            if let Err(err) = state
                 .mailer
                 .send_password_reset_email(&email, &raw_token)
-                .await;
+                .await
+            {
+                tracing::error!("Failed to dispatch password reset email: {}", err);
+            }
         }
     }
 
@@ -645,11 +1003,7 @@ pub async fn reset_password(
     Extension(state): Extension<Arc<AppState>>,
     Json(payload): Json<ResetPasswordRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
-    if payload.new_password.len() < 8 {
-        return Err(ApiError::BadRequest(
-            "New password must be at least 8 characters long".into(),
-        ));
-    }
+    password::validate_password_length(&payload.new_password)?;
 
     let token_hash = jwt::hash_refresh_token(&payload.token);
     let mut tx = state.pool.begin().await?;
