@@ -40,17 +40,16 @@ onedegree/
    make db-up
    ```
 
-3. **Run the API service (Rust Axum)**:
-   ```sh
-   make dev-api
-   ```
-   API runs on `http://localhost:8080` (API base: `http://localhost:8080/v1`).
-
-4. **Run the Web application (Next.js 16)**:
-   ```sh
-   make dev-web
-   ```
-   Access the web application at [http://localhost:3000](http://localhost:3000).
+3. **Run the stack for local development**:
+   - **Default (`make dev`)**: runs local Postgres + API (`MAILER=console`, links print to the terminal and no real emails are sent) + Web:
+     ```sh
+     make dev
+     ```
+   - **Real email delivery (`make dev-mail`)**: validates `RESEND_API_KEY` and `MAIL_FROM` in `api/.env` and starts the API with `MAILER=resend` (in Resend sandbox/test mode, emails only deliver to your Resend account address until a domain is verified):
+     ```sh
+     make dev-mail
+     ```
+   - Or run services individually (`make dev-api` and `make dev-web`): API runs on `http://localhost:8080` (`http://localhost:8080/v1`) and Web runs on [http://localhost:3000](http://localhost:3000).
 
 ---
 
