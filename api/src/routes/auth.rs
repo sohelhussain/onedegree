@@ -501,6 +501,46 @@ pub async fn register(
     Ok(generic_response)
 }
 
+async fn issue_session_response(
+    state: &AppState,
+    user: User,
+) -> Result<(HeaderMap, Json<AuthResponse>), ApiError> {
+    let access_token = jwt::create_access_token(
+        user.id,
+        state.config.jwt_secret.as_bytes(),
+        state.config.jwt_access_expiration_secs,
+    )?;
+
+    let raw_refresh = jwt::generate_refresh_token();
+    let hashed_refresh = jwt::hash_refresh_token(&raw_refresh);
+    let expires_at = Utc::now() + Duration::seconds(state.config.jwt_refresh_expiration_secs);
+
+    sqlx::query!(
+        r#"
+        INSERT INTO refresh_tokens (user_id, token_hash, expires_at)
+        VALUES ($1, $2, $3)
+        "#,
+        user.id,
+        hashed_refresh,
+        expires_at
+    )
+    .execute(&state.pool)
+    .await?;
+
+    let cookie = build_cookie_header(&raw_refresh, state.config.jwt_refresh_expiration_secs);
+    let mut response_headers = HeaderMap::new();
+    response_headers.insert(SET_COOKIE, cookie.parse().unwrap());
+
+    Ok((
+        response_headers,
+        Json(AuthResponse {
+            access_token,
+            expires_in: state.config.jwt_access_expiration_secs,
+            user: user.into(),
+        }),
+    ))
+}
+
 #[utoipa::path(
     post,
     path = "/v1/auth/login",
@@ -610,40 +650,7 @@ pub async fn login(
     }
 
     // 5. Issue 15-minute access token and rotating refresh token
-    let access_token = jwt::create_access_token(
-        user.id,
-        state.config.jwt_secret.as_bytes(),
-        state.config.jwt_access_expiration_secs,
-    )?;
-
-    let raw_refresh = jwt::generate_refresh_token();
-    let hashed_refresh = jwt::hash_refresh_token(&raw_refresh);
-    let expires_at = Utc::now() + Duration::seconds(state.config.jwt_refresh_expiration_secs);
-
-    sqlx::query!(
-        r#"
-        INSERT INTO refresh_tokens (user_id, token_hash, expires_at)
-        VALUES ($1, $2, $3)
-        "#,
-        user.id,
-        hashed_refresh,
-        expires_at
-    )
-    .execute(&state.pool)
-    .await?;
-
-    let cookie = build_cookie_header(&raw_refresh, state.config.jwt_refresh_expiration_secs);
-    let mut response_headers = HeaderMap::new();
-    response_headers.insert(SET_COOKIE, cookie.parse().unwrap());
-
-    Ok((
-        response_headers,
-        Json(AuthResponse {
-            access_token,
-            expires_in: state.config.jwt_access_expiration_secs,
-            user: user.into(),
-        }),
-    ))
+    issue_session_response(&state, user).await
 }
 
 #[utoipa::path(
@@ -651,7 +658,7 @@ pub async fn login(
     path = "/v1/auth/verify-email",
     request_body = VerifyEmailRequest,
     responses(
-        (status = 200, description = "Email verified and account created"),
+        (status = 200, description = "Email verified, account created, and session started", body = AuthResponse),
         (status = 400, description = "Invalid token, expired token, or password mismatch")
     ),
     tag = "Auth"
@@ -752,12 +759,15 @@ pub async fn verify_email(
         UserRole::User
     };
 
-    let insert_result = sqlx::query!(
+    let created_user = sqlx::query_as!(
+        User,
         r#"
         INSERT INTO users (email, password_hash, full_name, timezone, role, email_verified_at)
         VALUES ($1, $2, $3, 'UTC', $4, now())
         ON CONFLICT DO NOTHING
-        RETURNING id
+        RETURNING id, email, password_hash, full_name, avatar_url, timezone, coin_balance,
+                  email_verified_at, role as "role: UserRole", is_premium, premium_until,
+                  created_at, updated_at
         "#,
         email_lower,
         pending.password_hash,
@@ -774,18 +784,16 @@ pub async fn verify_email(
     .execute(&mut *tx)
     .await?;
 
-    if insert_result.is_none() {
+    let Some(created_user) = created_user else {
         tx.commit().await?;
         return Err(ApiError::BadRequest(
             "An account with this email already exists. Please sign in.".into(),
         ));
-    }
+    };
 
     tx.commit().await?;
 
-    Ok(Json(serde_json::json!({
-        "message": "Email verified successfully. You may now sign in."
-    })))
+    issue_session_response(&state, created_user).await
 }
 
 #[utoipa::path(

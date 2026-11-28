@@ -291,10 +291,21 @@ async fn test_hash_never_returned() {
             .unwrap(),
         ))
         .unwrap();
-    assert_eq!(
-        app.clone().oneshot(ver_req).await.unwrap().status(),
-        StatusCode::OK
-    );
+    let ver_res = app.clone().oneshot(ver_req).await.unwrap();
+    assert_eq!(ver_res.status(), StatusCode::OK);
+    let ver_cookie = ver_res
+        .headers()
+        .get("set-cookie")
+        .expect("verify-email must set HttpOnly refresh cookie")
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert!(ver_cookie.contains("refresh_token="));
+    assert!(ver_cookie.contains("HttpOnly"));
+    let ver_body = ver_res.into_body().collect().await.unwrap().to_bytes();
+    let ver_json: Value = serde_json::from_slice(&ver_body).unwrap();
+    assert!(ver_json["access_token"].as_str().is_some());
+    assert_eq!(ver_json["user"]["email_verified"], true);
 
     // 2. Login
     let login_req = Request::builder()
