@@ -40,8 +40,25 @@ function CheckEmailView() {
         <div className="space-y-1.5">
           <h1 className="text-xl font-bold text-[var(--text-primary)]">Check your email</h1>
           <p className="text-sm text-[var(--text-muted)]">
-            We sent a verification link{email ? ` to ${email}` : ""}. Open the link to activate your
-            account.
+            If this address can be used, we sent a verification link{email ? ` to ${email}` : ""}.
+            It expires in 24 hours.
+          </p>
+          <p className="text-xs text-[var(--text-muted)]">
+            Already have an account?{" "}
+            <Link
+              href="/login"
+              className="text-emerald-400 hover:text-emerald-300 underline-offset-2 hover:underline"
+            >
+              Sign in
+            </Link>{" "}
+            or{" "}
+            <Link
+              href="/forgot-password"
+              className="text-emerald-400 hover:text-emerald-300 underline-offset-2 hover:underline"
+            >
+              reset your password
+            </Link>
+            .
           </p>
         </div>
 

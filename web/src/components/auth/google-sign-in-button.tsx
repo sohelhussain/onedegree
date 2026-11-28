@@ -35,7 +35,33 @@ declare global {
 let gsiInitializedClientId: string | null = null;
 let gsiCredentialHandler: ((credential: string) => void) | null = null;
 
-export function GoogleSignInButton({ onSuccess }: { onSuccess?: () => void }) {
+function hasRenderedGsiButton(container: HTMLElement | null): boolean {
+  if (!container) return false;
+  const semanticTarget = container.querySelector<HTMLElement>(
+    "iframe, button, [role='button']"
+  );
+  if (semanticTarget) {
+    const rect = semanticTarget.getBoundingClientRect();
+    return rect.width >= 40 && rect.height >= 20;
+  }
+  for (const child of Array.from(container.children)) {
+    if (child instanceof HTMLElement) {
+      const rect = child.getBoundingClientRect();
+      if (rect.width >= 40 && rect.height >= 20) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+export function GoogleSignInButton({
+  onSuccess,
+  visible = true,
+}: {
+  onSuccess?: () => void;
+  visible?: boolean;
+}) {
   const { loginWithGoogle, isLoading } = useAuth();
   const buttonRef = useRef<HTMLDivElement>(null);
   const loginRef = useRef(loginWithGoogle);
@@ -56,29 +82,72 @@ export function GoogleSignInButton({ onSuccess }: { onSuccess?: () => void }) {
   }, [onSuccess]);
 
   useEffect(() => {
-    if (!hasValidClientId) return;
+    if (!hasValidClientId || scriptLoaded || scriptFailed) return;
     if (window.google?.accounts?.id) {
       Promise.resolve().then(() => setScriptLoaded(true));
+      return;
     }
-
-    const timer = window.setTimeout(() => {
-      if (scriptFailed) {
-        setFallbackVisible(true);
-        return;
+    const pollId = window.setInterval(() => {
+      if (window.google?.accounts?.id) {
+        setScriptLoaded(true);
+        window.clearInterval(pollId);
       }
-      const container = buttonRef.current;
-      const iframe = container?.querySelector("iframe");
-      const rect = iframe?.getBoundingClientRect();
-      if (!iframe || !rect || rect.height < 20 || rect.width < 40) {
+    }, 150);
+    return () => window.clearInterval(pollId);
+  }, [hasValidClientId, scriptLoaded, scriptFailed]);
+
+  useEffect(() => {
+    if (!hasValidClientId || !visible || scriptFailed || fallbackVisible) return;
+
+    let timer: number | null = window.setTimeout(() => {
+      timer = null;
+      if (!hasRenderedGsiButton(buttonRef.current)) {
         setFallbackVisible(true);
       }
     }, 4000);
 
-    return () => window.clearTimeout(timer);
-  }, [hasValidClientId, scriptFailed]);
+    const cancelIfRendered = () => {
+      if (timer !== null && hasRenderedGsiButton(buttonRef.current)) {
+        window.clearTimeout(timer);
+        timer = null;
+      }
+    };
+
+    cancelIfRendered();
+
+    const container = buttonRef.current;
+    const mutationObserver =
+      container && typeof MutationObserver !== "undefined"
+        ? new MutationObserver(cancelIfRendered)
+        : null;
+    if (container && mutationObserver) {
+      mutationObserver.observe(container, {
+        childList: true,
+        subtree: true,
+        attributes: true,
+      });
+    }
+
+    const resizeObserver =
+      container && typeof ResizeObserver !== "undefined"
+        ? new ResizeObserver(cancelIfRendered)
+        : null;
+    if (container && resizeObserver) {
+      resizeObserver.observe(container);
+    }
+
+    return () => {
+      if (timer !== null) {
+        window.clearTimeout(timer);
+      }
+      mutationObserver?.disconnect();
+      resizeObserver?.disconnect();
+    };
+  }, [hasValidClientId, visible, scriptFailed, fallbackVisible]);
 
   useEffect(() => {
-    if (!scriptLoaded || !window.google || !buttonRef.current || !hasValidClientId) {
+    const container = buttonRef.current;
+    if (!scriptLoaded || !window.google || !container || !hasValidClientId) {
       return;
     }
 
@@ -101,8 +170,8 @@ export function GoogleSignInButton({ onSuccess }: { onSuccess?: () => void }) {
         gsiInitializedClientId = clientId;
       }
 
-      if (!renderedRef.current && buttonRef.current.childElementCount === 0) {
-        window.google.accounts.id.renderButton(buttonRef.current, {
+      if (!renderedRef.current && container.childElementCount === 0) {
+        window.google.accounts.id.renderButton(container, {
           theme: "filled_black",
           size: "large",
           text: "continue_with",
@@ -118,6 +187,11 @@ export function GoogleSignInButton({ onSuccess }: { onSuccess?: () => void }) {
         setFallbackVisible(true);
       });
     }
+
+    return () => {
+      renderedRef.current = false;
+      container.innerHTML = "";
+    };
   }, [scriptLoaded, clientId, hasValidClientId]);
 
   return (

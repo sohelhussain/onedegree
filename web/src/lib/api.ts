@@ -158,10 +158,13 @@ export function loginWithEmailApi(payload: {
   });
 }
 
-export function verifyEmailApi(token: string): Promise<MessageResponse> {
+export function verifyEmailApi(payload: {
+  token: string;
+  password: string;
+}): Promise<MessageResponse> {
   return apiClient<MessageResponse>("/auth/verify-email", {
     method: "POST",
-    body: JSON.stringify({ token }),
+    body: JSON.stringify(payload),
   });
 }
 

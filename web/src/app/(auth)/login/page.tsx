@@ -53,6 +53,7 @@ function LoginView() {
     setSubmitting(true);
     try {
       await loginWithEmail(submittedEmail, submittedPassword);
+      setTab("google");
       router.replace(nextPath);
     } catch (err: unknown) {
       if (err instanceof ApiError && err.code === "EMAIL_NOT_VERIFIED") {
@@ -135,7 +136,10 @@ function LoginView() {
           )}
 
           <div className={emailAuthEnabled && tab !== "google" ? "hidden" : "space-y-3 py-2"}>
-            <GoogleSignInButton onSuccess={() => router.replace(nextPath)} />
+            <GoogleSignInButton
+              visible={!emailAuthEnabled || tab === "google"}
+              onSuccess={() => router.replace(nextPath)}
+            />
             <p className="text-xs text-center text-[var(--text-muted)]">
               Quick sign-in with your Google account
             </p>
