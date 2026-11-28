@@ -161,8 +161,8 @@ export function loginWithEmailApi(payload: {
 export function verifyEmailApi(payload: {
   token: string;
   password: string;
-}): Promise<MessageResponse> {
-  return apiClient<MessageResponse>("/auth/verify-email", {
+}): Promise<AuthResponse> {
+  return apiClient<AuthResponse>("/auth/verify-email", {
     method: "POST",
     body: JSON.stringify(payload),
   });
